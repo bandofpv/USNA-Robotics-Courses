@@ -1,0 +1,3 @@
+In Python you can create dictionaries. 
+In Python you can generate random numbers. 
+In Python you can make the computer do math for you. 

@@ -7,11 +7,11 @@ import gc
 lab = SBC() # Instantiate the RP2040 WSESBC
 
 # set up experiment parameters
-run_time = 5.0 # seconds
+run_time = 10.0 # seconds
 updateRate = 100 # Hz
 T = 1/updateRate # sampling period in sec
-z_PI = 5.6683 # PI zero for G_c(s) TF
-K = 0.053 # proportional gain
+z_PI = 0.7200 # PI zero for G_c(s) TF
+K = 0.1073 # proportional gain
 ref_pos = math.pi # rad
 
 def main(): # main fucntion comprising experiment sequence
@@ -26,11 +26,11 @@ def main(): # main fucntion comprising experiment sequence
         
         motorVolt = 3.0
         
-        t_list = [] # initialize array/list of time measurements
-        pos_list = [] # initialize array/list of positon measurements
-        spd_list = [] # initialize array/list of speed measurements
-        inpt_list = [] # initialize array/list of motor input measurements
-        error_list = [] # initialize array/list of error calculations
+#         t_list = [] # initialize array/list of time measurements
+#         pos_list = [] # initialize array/list of positon measurements
+#         spd_list = [] # initialize array/list of speed measurements
+#         inpt_list = [] # initialize array/list of motor input measurements
+#         error_list = [] # initialize array/list of error calculations
         pos_prev = lab._enc_device1.read_counter() * 2 * math.pi / 4096 # convert
         
         t_elapsed = 0.0 # variable to represent the elapsed time of the expirement
@@ -46,8 +46,9 @@ def main(): # main fucntion comprising experiment sequence
             pos_prev = pos
             
             # implement proportional integral controller
-            error = ref_speed - speed
+            error = ref_pos - pos
             
+            # Discretized PI Controller
             outputVoltage = output_prev + (K/2.0)*((2.0+z_PI*T)*error + (z_PI*T - 2.0)*error_prev)
             
             output_prev = outputVoltage
@@ -62,11 +63,16 @@ def main(): # main fucntion comprising experiment sequence
             lab._digipot_device.set_volt(outputVoltage)
             
             #store data in array
-            t_list.append(t_elapsed)
-            pos_list.append(pos)
-            spd_list.append(speed)
-            inpt_list.append(outputVoltage)
-            error_list.append(error)
+#             t_list.append(t_elapsed)
+#             pos_list.append(pos)
+#             spd_list.append(speed)
+#             inpt_list.append(outputVoltage)
+#             error_list.append(error)
+            
+            out_msg = f"{t_elapsed},{pos},{speed},{outputVoltage},{error};"
+            tty.print(out_msg)
+#             print(out_msg)
+            
             #countloop += 1
             time.sleep(T) #wait until sampling period ends
             
@@ -75,11 +81,11 @@ def main(): # main fucntion comprising experiment sequence
         lab._digipot_device.set_pot(0) # turn off motor
         
         #send data back to MATLAB
-        for i in range(len(t_list)):
-            out_msg = f"{t_list[i]},{pos_list[i]},{spd_list[i]},{inpt_list[i]},{error_list[i]};"
-            tty.print(out_msg)
-            print(out_msg)
-        print("finished sending trial data")
+#         for i in range(len(t_list)):
+#             out_msg = f"{t_list[i]},{pos_list[i]},{spd_list[i]},{inpt_list[i]},{error_list[i]};"
+#             tty.print(out_msg)
+#             print(out_msg)
+#         print("finished sending trial data")
         if n == 1:
             break 
         

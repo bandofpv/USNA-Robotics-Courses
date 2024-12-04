@@ -7,14 +7,18 @@ import gc
 lab = SBC() # Instantiate the RP2040 WSESBC
 
 # set up experiment parameters
+run_time = 2.5 # seconds
 updateRate = 100 # Hz
 T = 1/updateRate # sampling period in sec
-z_PI = 5.6683 # PI zero for G_c(s) TF
-K = 0.053 # proportional gain
+z_PI = 4.6213 # PI zero for G_c(s) TF
+z_c = 3.4983 # Lead zero for G_c(s) TF
+p_c = 28.1498 # Lead pole for G_c(s) TF
+K = 2.4020 # proportional gain
 ref_pos = math.pi # rad
 
 def main(): # main fucntion comprising experiment sequence
-    output_prev = 0 # initialize previous output variable
+    output_prev = 0 # initialize previous output voltage
+    intermediate_prev = 0 # initialize previous intermeidate voltage 
     error_prev = 0 # initialize previous error variable
 
     tty = ttyacm.open(1) # open data port
@@ -36,7 +40,7 @@ def main(): # main fucntion comprising experiment sequence
         t_start = time.ticks_ms() # clock time at start of experiment
         # Returns and increasing millisecond counter with an abritrary reference parameter
         # that wraps aroudn after some value.
-        while t_elapsed < 5.0:
+        while t_elapsed < run_time:
             t_elapsed = (time.ticks_ms() - t_start)*10**(-3) #sec
             # measure time since start of experiment
             count = lab._enc_device1.read_counter() # read from encoder
@@ -45,11 +49,17 @@ def main(): # main fucntion comprising experiment sequence
             pos_prev = pos
             
             # implement proportional integral controller
-            error = ref_speed - speed
+            error = ref_pos - pos
             
-            outputVoltage = output_prev + (K/2.0)*((2.0+z_PI*T)*error + (z_PI*T - 2.0)*error_prev)
+            # Discretized PI and Lead Controllers
+            PI_Controller_Voltage = intermediate_prev + (K/2.0)*((2.0+z_PI*T)*error + (z_PI*T - 2.0)*error_prev)
+            intermediateVoltage = PI_Controller_Voltage # intermediary output voltage from PI controller
+            Lead_Controller_Voltage = -1*((-2+p_c*T)/(2+p_c*T))*output_prev + ((2*K+K*z_c*T)/(2+p_c*T))*intermediateVoltage + ((-2*K+K*z_c*T)/(2+p_c*T))*intermediate_prev
+            outputVoltage = Lead_Controller_Voltage 
             
+            # update prev variables
             output_prev = outputVoltage
+            intermediate_prev = intermediateVoltage
             error_prev = error
             
             if outputVoltage > 10: #soft limits on motor voltage [-10,10]

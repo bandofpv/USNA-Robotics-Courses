@@ -7,12 +7,12 @@ import gc
 lab = SBC() # Instantiate the RP2040 WSESBC
 
 # set up experiment parameters
-run_time = 5.0 # seconds
+run_time = 2.0 # seconds
 updateRate = 100 # Hz
 T = 1/updateRate # sampling period in sec
-z_c = 5.6683 # Lead zero for G_c(s) TF
-p_c = 0 # Lead pole for G_c(s) TF
-K = 0.053 # proportional gain
+z_c = 9.0915 # Lead zero for G_c(s) TF
+p_c = 25.3115 # Lead pole for G_c(s) TF
+K = 1.2958 # proportional gain
 ref_pos = math.pi # rad
 
 def main(): # main fucntion comprising experiment sequence
@@ -47,9 +47,10 @@ def main(): # main fucntion comprising experiment sequence
             pos_prev = pos
             
             # implement lead controller
-            error = ref_speed - speed
+            error = ref_pos - pos
             
-            outputVoltage = -1*((-2+p_c*T)/(2+p_c*T))*output_prev + ((2*K+K*z_c*T)/(2+p_c*T))*error + ((-2*K+K*z_c*T)/(2+P_c*T))*error_prev
+            # Discretized Lead Controller
+            outputVoltage = -1*((-2+p_c*T)/(2+p_c*T))*output_prev + ((2*K+K*z_c*T)/(2+p_c*T))*error + ((-2*K+K*z_c*T)/(2+p_c*T))*error_prev
             
             output_prev = outputVoltage
             error_prev = error

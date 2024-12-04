@@ -29,7 +29,7 @@ def main(): # main fucntion comprising experiment sequence
         t_start = time.ticks_ms() # clock time at start of experiment
         # Returns and increasing millisecond counter with an abritrary reference parameter
         # that wraps aroudn after some value.
-        while t_elapsed < 1.0:
+        while t_elapsed < 2.5:
             t_elapsed = (time.ticks_ms() - t_start)*10**(-3) #sec
             # measure time since start of experiment
             count = lab._enc_device1.read_counter() # read from encoder

@@ -7,13 +7,13 @@ import gc
 lab = SBC() # Instantiate the RP2040 WSESBC
 
 # set up experiment parameters
-run_time = 2.5 # seconds
+run_time = 10.0 # seconds
 updateRate = 100 # Hz
 T = 1/updateRate # sampling period in sec
-z_PI = 4.6213 # PI zero for G_c(s) TF
-z_c = 3.4983 # Lead zero for G_c(s) TF
-p_c = 28.1498 # Lead pole for G_c(s) TF
-K = 2.4020 # proportional gain
+z_PI = 4.4538 # PI zero for G_c(s) TF
+z_c = 3.3751 # Lead zero for G_c(s) TF
+p_c = 27.2156 # Lead pole for G_c(s) TF
+K = 2.3835 # proportional gain
 ref_pos = math.pi # rad
 
 def main(): # main fucntion comprising experiment sequence
@@ -54,7 +54,8 @@ def main(): # main fucntion comprising experiment sequence
             # Discretized PI and Lead Controllers
             PI_Controller_Voltage = intermediate_prev + (K/2.0)*((2.0+z_PI*T)*error + (z_PI*T - 2.0)*error_prev)
             intermediateVoltage = PI_Controller_Voltage # intermediary output voltage from PI controller
-            Lead_Controller_Voltage = -1*((-2+p_c*T)/(2+p_c*T))*output_prev + ((2*K+K*z_c*T)/(2+p_c*T))*intermediateVoltage + ((-2*K+K*z_c*T)/(2+p_c*T))*intermediate_prev
+            Lead_Controller_Voltage = -1*((-2+p_c*T)/(2+p_c*T))*output_prev + ((2+z_c*T)/(2+p_c*T))*intermediateVoltage + ((-2+z_c*T)/(2+p_c*T))*intermediate_prev
+#             Lead_Controller_Voltage = -1*((-2+p_c*T)/(2+p_c*T))*output_prev + ((2*K+K*z_c*T)/(2+p_c*T))*intermediateVoltage + ((-2*K+K*z_c*T)/(2+p_c*T))*intermediate_prev
             outputVoltage = Lead_Controller_Voltage 
             
             # update prev variables
@@ -71,11 +72,16 @@ def main(): # main fucntion comprising experiment sequence
             lab._digipot_device.set_volt(outputVoltage)
             
             #store data in array
-            t_list.append(t_elapsed)
-            pos_list.append(pos)
-            spd_list.append(speed)
-            inpt_list.append(outputVoltage)
-            error_list.append(error)
+#             t_list.append(t_elapsed)
+#             pos_list.append(pos)
+#             spd_list.append(speed)
+#             inpt_list.append(outputVoltage)
+#             error_list.append(error)
+            
+            out_msg = f"{t_elapsed},{pos},{speed},{outputVoltage},{error};"
+            tty.print(out_msg)
+#             print(out_msg)
+            
             #countloop += 1
             time.sleep(T) #wait until sampling period ends
             
@@ -84,11 +90,11 @@ def main(): # main fucntion comprising experiment sequence
         lab._digipot_device.set_pot(0) # turn off motor
         
         #send data back to MATLAB
-        for i in range(len(t_list)):
-            out_msg = f"{t_list[i]},{pos_list[i]},{spd_list[i]},{inpt_list[i]},{error_list[i]};"
-            tty.print(out_msg)
-            print(out_msg)
-        print("finished sending trial data")
+#         for i in range(len(t_list)):
+#             out_msg = f"{t_list[i]},{pos_list[i]},{spd_list[i]},{inpt_list[i]},{error_list[i]};"
+#             tty.print(out_msg)
+#             print(out_msg)
+#         print("finished sending trial data")
         if n == 1:
             break 
         

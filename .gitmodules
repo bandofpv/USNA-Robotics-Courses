@@ -1,0 +1,3 @@
+[submodule "EW309"]
+	path = EW309
+	url = https://github.com/bandofpv/EW309.git

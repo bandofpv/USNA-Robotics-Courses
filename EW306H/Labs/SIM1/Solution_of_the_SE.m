@@ -7,7 +7,7 @@ D = 0;
 u = 0;
 x_init = [1; 0];
 
-out = sim('sim1_simulink', 5);
+out = sim('Solution_of_the_SE_Simulink', 5);
 
 figure;
 plot(out.y.Time, out.y.Data);
@@ -28,7 +28,7 @@ D = 0;
 u = 1;
 x_init = [0; 0];
 
-out = sim('sim1_simulink', 5);
+out = sim('Solution_of_the_SE_Simulink', 5);
 
 figure;
 plot(out.y.Time, out.y.Data);
@@ -48,7 +48,7 @@ D = 0;
 u = 1;
 x_init = [1; 0];
 
-out = sim('sim1_simulink', 5);
+out = sim('Solution_of_the_SE_Simulink', 5);
 
 figure;
 plot(out.y.Time, out.y.Data);
@@ -79,7 +79,7 @@ x_2 = [-1 -0.5 0 0.5 1 ...
 figure;
 for i = 1:length(x_1)
     x_init = [x_1(i); x_2(i)];
-    out = sim('sim1_simulink', 5);
+    out = sim('Solution_of_the_SE_Simulink', 5);
     
     plot(out.x.Data(:,1), out.x.Data(:,2));
     title("State Space Graph")

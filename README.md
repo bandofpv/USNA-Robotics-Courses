@@ -8,3 +8,7 @@ Code for my robotics courses at USNA
 **[EW301](https://github.com/bandofpv/USNA-Robotics-Courses/tree/main/EW301) (System Modeling and Simulation)**
 
 **[EW305H](https://github.com/bandofpv/USNA-Robotics-Courses/tree/main/EW305H) (Honors Linear Control Engineering)**
+
+**[EW306H](https://github.com/bandofpv/USNA-Robotics-Courses/tree/main/EW306H) (Honors Advanced Control Engineering)**
+
+**[EW309](https://github.com/bandofpv/EW309/tree/main) (Guided Design Experience)**

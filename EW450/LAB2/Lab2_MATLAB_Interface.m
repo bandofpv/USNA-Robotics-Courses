@@ -1,0 +1,60 @@
+%% Initialize
+ur = URQt('UR3e');
+ur.Initialize
+%% Waypoint 1 (Right over block 1)
+q1 = ur.Joints;
+%% Waypoint 2 (Grasp block 1)
+q2 = ur.Joints;
+%% Close Gripper Position
+gp = ur.GripPosition;
+%% Waypoint 3 (Above block 1 & 2 place)
+q3 = ur.Joints;
+%% Waypoint 4 (Place block 1)
+q4 = ur.Joints;
+%% Waypoint 5 (Above block 2)
+q5 = ur.Joints;
+%% Waypoint 6 (Grasp block 2)
+q6 = ur.Joints;
+%% Waypoint 7 (Place block 2)
+q7 = ur.Joints;
+%%  Stack and unstack
+while true
+    % Stack
+    ur.GripPosition = 0;
+    ur.Joints = q1;
+    ur.Joints = q2;
+    ur.GripPosition = gp;
+    ur.Joints = q1;
+    ur.Joints = q3;
+    ur.Joints = q4;
+    ur.GripPosition = 0;
+    ur.Joints = q3;
+    ur.Joints = q5;
+    ur.Joints = q6;
+    ur.GripPosition = gp;
+    ur.Joints = q5;
+    ur.Joints = q3;
+    ur.Joints = q7;
+    ur.GripPosition = 0;
+    ur.Joints = q3;
+
+    % Unstack
+    ur.Joints = q7;
+    ur.GripPosition = gp;
+    ur.Joints = q3;
+    ur.Joints = q5;
+    ur.Joints = q6;
+    ur.GripPosition = 0;
+    ur.Joints = q5;
+    ur.Joints = q3; 
+    ur.Joints = q4;
+    ur.GripPosition = gp;
+    ur.Joints = q3;
+    ur.Joints = q1;
+    ur.Joints = q2;
+    ur.GripPosition = 0;
+end
+%% Shutdown
+ur.GripPosition = 0;
+ur.Home;
+clear ur;

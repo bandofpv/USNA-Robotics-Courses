@@ -1,9 +1,12 @@
 %% Inverse Kinematics Function
-% X - 4-element array containing UR3e task configuration such that X = (x, y, z, ϕ)
-%   where x, y, and z are defined in millimeters, and ϕ is defined in radians.
+% X - 4-element array containing UR3e task configuration such that 
+%   X = (x, y, z, ϕ)^T where x, y, and z are defined in millimeters, 
+%   and ϕ is defined in radians.
 % L - 6-element array containing UR3e link lengths in millimeters.
-% q_eu - 6-element array containing UR3e elbow-up joint configuration in radians.
-% q_ed - 6-element array containing UR3e elbow-down joint configuration in radians.
+% q_eu - 6-element array containing UR3e elbow-up joint configuration in
+%   radians.
+% q_ed - 6-element array containing UR3e elbow-down joint configuration in 
+%   radians.
 
 function [q_eu, q_ed] = ikinPickAndPlace(X,L)
     % extract data from inputs

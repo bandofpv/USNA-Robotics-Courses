@@ -6,5 +6,5 @@
 
 function X = poseToTask(H_e2b)
     phi = atan2(H_e2b(2,1), H_e2b(1,1));
-    X = [H_e2b(4,1); H_e2b(4,2); H_e2b(4,3); phi];
+    X = [H_e2b(1,4); H_e2b(2,4); H_e2b(3,4); phi];
 end

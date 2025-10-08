@@ -60,7 +60,7 @@ Xo_b_above = X_b(1:3,1) + [0; 0; 10]; % point above first drawing point
 Xf_b_above = X_b(1:3,end) + [0; 0; 10]; % point above last drawing point
 
 Xo = [Xo_b_above; phi]; % task configuration for first point
-L = [151.85, 243.55, 213.2, 131.05, 85.35, 92.10]; % link lengths
+L = [151.85; 243.55; 213.2; 131.05; 85.35; 92.10]; % link lengths
 q = ikinPickAndPlace(Xo, L); % calculate ikin for first point
 ur.Joints = q; % move UR3e manipulator
 

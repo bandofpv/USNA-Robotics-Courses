@@ -12,3 +12,7 @@ Code for my robotics courses at USNA
 **[EW306H](https://github.com/bandofpv/USNA-Robotics-Courses/tree/main/EW306H) (Honors Advanced Control Engineering)**
 
 **[EW309](https://github.com/bandofpv/EW309/tree/main) (Guided Design Experience)**
+
+**[EW450](https://github.com/bandofpv/USNA-Robotics-Courses/tree/main/EW450) (Introduction to Robotic Systems)**
+
+**[EW456](https://github.com/bandofpv/USNA-Robotics-Courses/tree/main/EW456) (Autonomous Vehicles)**

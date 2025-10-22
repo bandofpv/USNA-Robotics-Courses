@@ -66,14 +66,14 @@ xlabel("Time (s)")
 ylabel("Angular Velocity (rad/s)")
 legend("p", "q", "r", "Location", "northeastoutside")
 
-%% Spin at 45 degree tilt
+%% Spin at 45 degree roll
 
 load("fourty_five.mat")
 gyro_data(:, 1) = gyro_data(:, 1) - gyro_data(1, 1); % start time at t=0
 
 % Plot p, q, r
 plot(gyro_data(:, 1), gyro_data(:, 2:4))
-title("Gyro Rates: Spin @ 45 deg tilt")
+title("Gyro Rates: Spin @ 45 deg roll")
 xlabel("Time (s)")
 ylabel("Angular Velocity (rad/s)")
 legend("p", "q", "r", "Location", "northeastoutside")
@@ -84,15 +84,9 @@ load("random.mat")
 accel_data(:, 1) = accel_data(:, 1) - accel_data(1, 1); % start time at t=0
 
 filter_accel = [];
-filter_accel(1:3) = accel_data(1, 2:4);
-a = 1; 
-for i = 2:size(accel_data, 1)
-    dt = accel_data(i, 1) - accel_data(i-1, 1);
-    filter_accel(i, 1:3) = (1 - a*dt)*filter_accel(i-1, 1:3) + a*dt*accel_data(i-1, 2:4);
-end
-
-filter_accel = [];
-filter_accel(1, 1:3, 1:3) = accel_data(1, 2); % initilize with accel at t=0
+filter_accel(1, 1:3, 1) = accel_data(1, 2:4); % initilize with accel at t=0
+filter_accel(1, 1:3, 2) = accel_data(1, 2:4); % initilize with accel at t=0
+filter_accel(1, 1:3, 3) = accel_data(1, 2:4); % initilize with accel at t=0
 
 % Set cutoff freq (in rad/s)
 a = 2*pi.*[0.1; 1; 10];
@@ -102,7 +96,7 @@ for n = 1:size(a,1)
         dt = accel_data(i, 1) - accel_data(i-1, 1);
         if (1 - a(n)*dt) > 0
             filter_accel(i, 1:3, n) = (1 - a(n)*dt)*...
-                filter_accel(i-1, 1:3, n) + a(n)*dt*accel_data(i-1, 2);
+                filter_accel(i-1, 1:3, n) + a(n)*dt*accel_data(i-1, 2:4);
         end
         % filter_accel(i, 1:3, n) = (1 - a(n)*dt)*...
         %     filter_accel(i-1, 1:3, n) + a(n)*dt*accel_data(i-1, 2);
@@ -149,7 +143,7 @@ ylabel("Angular Velocity (rad/s)")
 legend("Raw", "Filtered (0.1Hz)", "Filtered (1Hz)", "Filtered (10Hz)", "Location", "northeastoutside")
 hold off
 
-%% Estimating Altitude
+%% Estimating Attitude
 
 StartTime = tic; % all timing info is relative to start, in sec
 StopTime = 10; % how long to collect data for
@@ -179,7 +173,7 @@ while(toc(StartTime)<StopTime)
     
         accel_data = [accel_data;[t_imu udot vdot wdot]];
         gyro_data = [gyro_data;[t_imu p q r]];
-        euler_data = [euler_data;[t_imu, phi_deg, theta_deg, phi_deg]];
+        euler_data = [euler_data;[t_imu, phi_deg, theta_deg, psi]];
 
         gb.imu_data_flag = false;
 
@@ -205,10 +199,18 @@ euler_data(:, 1) = euler_data(:, 1) - euler_data(1, 1); % start at t=0
 yline(45) % desired roll and pitch
 hold on
 plot(euler_data(:, 1), euler_data(:, 2:3)) % plot measured roll and pitch
+yline(min(euler_data(:, 2)), 'g')
+yline(max(euler_data(:, 2)), 'g')
+yline(min(euler_data(:, 3)), 'g')
+yline(max(euler_data(:, 3)), 'g')
 hold off
 ylim([35, 50])
 yticks(35:1:50)
 title("Estimating Roll and Pitch Angle")
 xlabel("Time (s)")
 ylabel("Attitude Angle (deg)")
-legend("Actual Roll/Pitch", "Measured Pitch", "Measured Roll")
+legend("Actual Roll/Pitch", "Estimated Roll", "Estimated Pitch")
+
+fprintf("Roll range = %.1f Pitch range = %.1f\n",...
+    [max(euler_data(:, 2))-min(euler_data(:, 2)), ...
+    max(euler_data(:, 3))-min(euler_data(:, 3))])

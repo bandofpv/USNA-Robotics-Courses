@@ -9,9 +9,9 @@ camSettings = adjustCamera(cam);
 %% Acquire Calibration Images
 
 imBaseName = 'im';
-calFolderName = 'Lab07 CamCal';
-images = 10;
-getCalibrationImages(prv,imBaseName,calFolderName,images);
+calFolderName = 'Lab07_CamCal';
+nImages = 10;
+getCalibrationImages(prv,imBaseName,calFolderName,nImages);
 
 %% Calibration
 

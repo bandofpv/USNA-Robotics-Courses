@@ -21,11 +21,9 @@ ctrl_data = [];
 des_psi_dat = [];
 
 % b. Gains and constants
-
-% ENTER YOUR GAINS AND CONTROL CONSTANTS HERE
-Kp_yaw = 0.5;
-des_yaw = pi/2;
-des_u = 0.2;
+Kp_yaw = 0.5; % heading gain
+des_yaw = pi/2; % desired heading
+des_u = 0.2; % desired forward speed
 
 % c. Set Initial pose of Rover
 sim.setObjectOrientation(create_h,[0,0,0])
@@ -61,7 +59,7 @@ while t < t_run
 
     yaw = eul(3);
     yaw_error = des_yaw - yaw;
-    r = Kp_yaw * wrapToPi(yaw_error);
+    r = Kp_yaw * wrapToPi(yaw_error); % proportional control
     % r = Kp_yaw * yaw_error;
 
     % Limit turn rate from -pi/2 to pi/2
@@ -140,10 +138,10 @@ des_pos_dat = [];
 des_psi_dat = [];
 
 % Define Controller Gains and algorithm constants
-wp_num = 1;
-wp_rad = 0.1;
-Kp_yaw = 0.5;
-Kp_speed = 1;
+wp_num = 1; % waypoing index
+wp_rad = 0.1; % waypoint radius
+Kp_yaw = 0.5; % heading gain
+Kp_speed = 1; % forward speed gain
 
 % Set Initial pose of Rover
 sim.setObjectOrientation(create_h,[0,0,0])
@@ -184,7 +182,7 @@ while t < t_run
     ang_vel = [ang_vel{1} ang_vel{2} ang_vel{3}]'; % format into numeric array
     
     % Set Desired Position (waypoint location at time t)
-    
+
     x_des = p_des(1, wp_num);
     y_des = p_des(2, wp_num);
 
@@ -196,14 +194,16 @@ while t < t_run
     y = pos(2);
     x_error = x_des - x;
     y_error = y_des - y;
-    psi_des = atan2(y_error, x_error);
+    psi_des = atan2(y_error, x_error); % calculated desired heading
     dist2wp = sqrt(x_error^2 + y_error^2);
-    u_des = Kp_speed*dist2wp;
+    u_des = Kp_speed*dist2wp; % proportional forward speed control
 
+    % Iterate waypoints after reaching waypoing radius
     if dist2wp < wp_rad
         wp_num = wp_num + 1;
     end
 
+    % Break after reaching final waypoint
     if wp_num > numWypts
         break
     end
@@ -213,7 +213,7 @@ while t < t_run
     
     psi = eul(3);
     yaw_error = psi_des - psi;
-    r = Kp_yaw * wrapToPi(yaw_error);
+    r = Kp_yaw * wrapToPi(yaw_error); % proportional heading control
 
     u = u_des;
 
@@ -250,7 +250,7 @@ while t < t_run
 
 end
 
-% % delete waypoint markers
+% delete waypoint markers
 for i=1:numWypts
     sim.removeObject(WpHandles(i));
 end
@@ -260,7 +260,7 @@ sim.stopSimulation();
 
 %% Plot Results from simulation
 
-% Plot X vs. Y
+% Plot X vs. Y with waypoints
 figure(1)
 plot(pos_dat(1, :), pos_dat(2, :))
 hold on

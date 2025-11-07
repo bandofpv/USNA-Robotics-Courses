@@ -1,0 +1,147 @@
+close all
+clear
+fprintf('Program started\n')
+
+client = RemoteAPIClient();
+sim = client.require('sim');
+scene_handles = sim.getObjectsInTree(sim.handle_scene,sim.handle_all,2);
+create_h = sim.getObject('/create');
+create_name = sim.getObjectAlias(create_h);
+
+%% Path following pure-pursuit controller
+
+% Initialize Empty Arrays to be filled with data for plotting
+time = []; % time array
+pos_dat = []; % position of vehicle over time
+vel_dat = []; % velocity of vehicle over time
+eul_dat = []; % Euler angles of vehicle over time
+ang_vel_dat = []; % angular velocity of vehicle over time
+err_dat = []; % position error over time
+ctrl_data = []; % control inputs over time
+
+% Load and evaluate path
+load('Path.mat');
+s = linspace(0,1,1000);
+path = ppval(pp,s);
+
+% define control constants here!
+d_stop = 0.01;  % Stop condition
+p_target = [0; 0]; % Target point
+l_d = 1; % Lookahead distance
+
+% Define variables for initial pose
+x_init = 0;
+y_init = 0;
+eul_init = 0;
+
+% Set Initial pose of Rover
+sim.setObjectPosition(create_h,[x_init,y_init,0.1])
+sim.setObjectOrientation(create_h,[0,0,eul_init(1)])
+
+% Run a simulation in stepping mode:
+sim.setStepping(true);
+sim.startSimulation();
+
+% Get Initial Simulation time
+t = sim.getSimulationTime();
+t_run = 240; % Run Simulation Time
+
+drawingObjectHandle = sim.addDrawingObject(sim.drawing_lines, 2, 0, -1, 9999, [1, 0, 0]);
+% Add the path vertices to the drawing object
+for i = 1:length(path)-1
+    sim.addDrawingObjectItem(drawingObjectHandle, [[path(1:2, i); 0.01]' [path(1:2, i+1); 0.01]']);
+end
+
+while t < t_run 
+    t = sim.getSimulationTime();
+    dt = sim.getSimulationTimeStep();
+
+    pos_cell = sim.getObjectPosition(create_h)';
+    pos = [pos_cell{1},pos_cell{2},pos_cell{3}];
+    quat_cell = sim.getObjectQuaternion(create_h)'; % Coppelia uses [x y z W] convention
+    quat = [quat_cell{4};quat_cell{1};quat_cell{2};quat_cell{3}]'; % Matlab uses [x y z w] convention
+    eul = quat2eul(quat, 'XYZ')';
+    [vel_g, ang_vel] = sim.getObjectVelocity(create_h);
+    vel_g = [vel_g{1}, vel_g{2}, vel_g{3}]';
+    ang_vel = [ang_vel{1} ang_vel{2} ang_vel{3}]';
+    
+    % Compute Rotation Matrix from Euler Angles
+    R_gb = angle2dcm(eul(1),eul(2),eul(3),'XYZ'); % eul2rotm returns matrix from body to global
+
+    %-------------------- Pure Pursuit control ------------------
+
+    % Find the path point closest to the vehicle
+    vehicle_to_path = sqrt(sum((path - pos(1:2)').^2));
+    [p_min, p_min_idx] = min(vehicle_to_path);
+
+    % Determine the target point using lookahead distance and closest point
+    if p_min > l_d
+        % set target point to min point if further than lookahead distance
+        p_target = path(:, p_min_idx);
+    else
+        % only choose points in front of min point
+        path_segment = path(:, p_min_idx:end); 
+
+        % find the point that is at the lookahead distance
+        p_l_d = abs(sqrt(sum((path_segment - pos(1:2)').^2) - l_d));
+        [~, p_l_d_min_idx] = min(p_l_d);
+
+        % set target point to point at lookahead distance
+        p_target = path_segment(:, p_l_d_min_idx);
+    end
+
+    % calculate vector from current position to target point
+    vec_to_target_g = p_target - pos(1:2)';
+    vec_to_target_b = R_gb * [vec_to_target_g; 1]; % convert to body frame
+    x = vec_to_target_b(1);
+    y = vec_to_target_b(2);
+    alpha = atan2(y, x);
+    r_des = (2*sin(alpha)) / l_d; % calculated desired turn rate
+
+    % Break loop if reached end of path
+    if vehicle_to_path(:, end) < d_stop
+        break
+    end
+
+    % Define forward speed
+    u_des = 0.2;
+
+    % Bound forward speed and turn rate
+    u = max(-0.304,min(u_des,0.304));
+    r = max(-1.57,min(r_des,1.57));
+
+    % -------------------------------------------------------
+    % -----------------Speed Control -----------------------
+
+    % Set the servo and esc command signals must be integers
+    sim.setFloatSignal(sprintf("%s_u",create_name), u); % Send Servo PWM 1000-2000
+    sim.setFloatSignal(sprintf("%s_r",create_name), r);  % Send Esc PWM 1000-2000
+
+    sim.step();  % triggers next simulation step
+    
+    % log data from this time step
+    time = [time t];
+    pos_dat = [pos_dat;pos];
+    vel_dat = [vel_dat;vel_g];
+    eul_dat = [eul_dat;eul];
+    ctrl_data = [ctrl_data [u;r]];
+
+end
+
+sim.removeObject(drawingObjectHandle);
+pause(0.2)
+sim.stopSimulation();
+
+%% Plot results
+
+% Plot X vs. Y with path
+figure(1)
+plot(pos_dat(:, 1), pos_dat(:, 2))
+hold on
+plot(path(1, :), path(2, :));
+hold off
+axis equal
+title("X vs. Y Vehicle Trajectory")
+xlabel("X Position (m)")
+ylabel("Y Position (m)")
+legend("Vehicle Trajectory", "Path")

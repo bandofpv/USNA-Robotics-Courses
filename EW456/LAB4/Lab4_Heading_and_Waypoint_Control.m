@@ -265,7 +265,7 @@ figure(1)
 plot(pos_dat(1, :), pos_dat(2, :))
 hold on
 scatter(p_des(1, :), p_des(2, :), '*');
-hold on
+hold off
 axis equal
 title("X vs. Y Vehicle Trajectory")
 xlabel("X Position (m)")

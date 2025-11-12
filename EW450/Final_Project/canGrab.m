@@ -1,3 +1,10 @@
+
+
+
+%% DELETE!!!!!!!!!!!!!
+
+
+
 % Input 1: pieceTags - Nx4 cell array specifying Piece AprilTags (Tag 
 % Family, Tag ID, Tag Scale, O/X)
 % Output 1: tags - Nx4 cell array specifying Piece AprilTags (Tag 
@@ -18,4 +25,4 @@ function [tags] = canGrab(pieceTags, H_b2o)
     end
 end
 
-%% THIS IS A WIP
+%% THIS IS A WIP MIGHT DELETE

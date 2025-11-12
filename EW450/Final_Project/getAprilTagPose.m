@@ -1,4 +1,4 @@
-% Input 1: imDist - image captured directly from camera.
+% Input 1: im - undistorted image captured from camera.
 % Input 2: cameraParams - MATLAB camera parameters object.
 % Input 3: tagFamily - character array specifying the tag family.
 % Input 4: tagID - scalar integer specifying the tag ID.
@@ -6,13 +6,10 @@
 % Output 1: H_a2c - 4x4 array specifying the pose of the AprilTag frame relative to the camera
 % frame.
 
-function [H_a2c] = getAprilTagPose(imDist,cameraParams,tagFamily,tagID,tagSize)
+function [H_a2c] = getAprilTagPose(im,cameraParams,tagFamily,tagID,tagSize)
 
     % Initilize empy set
     H_a2c = [];
-
-    % Undistort image <--- Undistort using lens parameters included in cameraParams
-    im = undistortImage(imDist,cameraParams);
     
     % Parse Intrinsic Matrix
     A_c2m = cameraParams.IntrinsicMatrix.'; % <-- Note the transpose

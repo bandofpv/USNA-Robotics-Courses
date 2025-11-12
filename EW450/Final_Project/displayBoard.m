@@ -1,4 +1,4 @@
-% Input 1: board - 3x3 array of strings either empty, 'X', or 'O'
+% Input 1: board - 3x3 array of characters either ' ', 'X', or 'O'
 
 function displayBoard(board)
     fprintf('\n');

@@ -3,7 +3,7 @@
 % Output 1: H_b2c - 4x4 array specifying the pose of the Board frame (at
 % board's center) relative to the camera frame.
 
-function [H_b2c] = getBoardPose(imDist,cameraParams)
+function [H_b2c] = getBoardPose(imDist, cameraParams)
     % Board tags (pose=centerTotag): Tag Family, Tag ID, Tag Scale, X, Y
     tags = {'tag36h11' 450 29.0  75.0 -115.0; 
             'tag36h11' 460 29.0 -75.0 -115.0};
@@ -27,19 +27,19 @@ function [H_b2c] = getBoardPose(imDist,cameraParams)
         p_i2a = [tags{i, 4}; tags{i, 5}; 0]; 
         
         % find AprilTag pose
-        H_a2c = getAprilTagPose(im,cameraParams,tagFamily,tagID,tagSize); 
-
-        % Define point relative to camera frame
-        p_i2c = H_a2c * [p_i2a; 1]; 
-
-        % Define center pose relative to camera frame
-        H_i2c = H_a2c; % copy AprilTag pose
-        H_i2c(1:3,4) = p_i2c(1:3,:); % define position of board center
+        H_a2c = getAprilTagPose(im,cameraParams,tagFamily,tagID,tagSize);
 
         % Check if pose exists
         if isempty(H_a2c)
-            missingTag = True;
+            missingTag = true;
         else
+            % Define point relative to camera frame
+            p_i2c = H_a2c * [p_i2a; 1]; 
+    
+            % Define center pose relative to camera frame
+            H_i2c = H_a2c; % copy AprilTag pose
+            H_i2c(1:3,4) = p_i2c(1:3,:); % define position of board center
+
             H_b2c = H_i2c; % save pose in case a tag is missing
             centerPoses{i} = H_i2c; % add to cell to average later
         end
@@ -56,27 +56,31 @@ function [H_b2c] = getBoardPose(imDist,cameraParams)
         H_b2c(1:3, 4) = t_avg;
     end
 
-    % Plot image
-    fig = figure;
-    axs = axes('Parent',fig);
-    hold(axs,'on');
-    axis(axs,'tight');
-    img = imshow(im,'Parent',axs);
-
-    % Define projection matrix
-    P_b2m = A_c2m * H_b2c(1:3,:);
-
-    % Project x/y axes of Board Frame into the image
-    xy_b = 1.2*tagSize*[...
-    0, 1, 0;...
-    0, 0, 1;...
-    0, 0, 0];
-    xy_b(4,:) = 1;
-    sxy_m = P_b2m*xy_b;
-    xy_m = sxy_m./sxy_m(3,:);
-
-    % Plot x-axis
-    pltx = plot(axs,xy_m(1,[1,2]),xy_m(2,[1,2]),'r','LineWidth',2);
-    % Plot y-axis
-    plty = plot(axs,xy_m(1,[1,3]),xy_m(2,[1,3]),'g','LineWidth',2);
+    % % COMMENT OUT AFTER (PLOTS BOARD POSE)
+    % % Plot board pose if H_b2c was calculated
+    % if ~isempty(H_b2c)
+    %     % Plot image
+    %     fig = figure;
+    %     axs = axes('Parent',fig);
+    %     hold(axs,'on');
+    %     axis(axs,'tight');
+    %     img = imshow(im,'Parent',axs);
+    % 
+    %     % Define projection matrix
+    %     P_b2m = A_c2m * H_b2c(1:3,:);
+    % 
+    %     % Project x/y axes of Board Frame into the image
+    %     xy_b = 1.2*tagSize*[...
+    %     0, 1, 0;...
+    %     0, 0, 1;...
+    %     0, 0, 0];
+    %     xy_b(4,:) = 1;
+    %     sxy_m = P_b2m*xy_b;
+    %     xy_m = sxy_m./sxy_m(3,:);
+    % 
+    %     % Plot x-axis
+    %     pltx = plot(axs,xy_m(1,[1,2]),xy_m(2,[1,2]),'r','LineWidth',2);
+    %     % Plot y-axis
+    %     plty = plot(axs,xy_m(1,[1,3]),xy_m(2,[1,3]),'g','LineWidth',2);
+    % end
 end

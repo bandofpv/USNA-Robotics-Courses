@@ -3,19 +3,18 @@
 % Input 3: cameraParams - MATLAB camera parameters object.
 % Input 4: nImages - positive scalar integer specifying the number of images to take during
 % calibration.
-% Output 1: H o2c - 4x4 array defining the UR3e base frame pose relative to the camera frame.
-% Output 2: H c2o - 4x4 array defining the camera frame pose relative to the UR3e base frame.
+% Output 1: H_o2c - 4x4 array defining the UR3e base frame pose relative to the camera frame.
+% Output 2: H_c2o - 4x4 array defining the camera frame pose relative to the UR3e base frame.
 
 function [H_o2c,H_c2o] = calibrateCameraAndRobot(prv,ur,cameraParams,nImages)
     
     % Define image base name, folder name, and number of images
     imBaseName = 'coCal';
     calFolderName = 'RobCamCal';
-    nImages = 10;
     
     % Prompt user for checkerboard Square Size
     squareSize = inputdlg({'Enter square size in millimeters'},'SquareSize',...
-    [1,35],{'10.00'});
+    [1,35],{'15.00'});
     if numel(squareSize) == 0
         warning('Action cancelled by user.');
         out = [];

@@ -93,17 +93,17 @@ while t < t_run
     vel_b = R_gb*vel_g;  % Compute the body frame velocity vector
 
     % Set Desired Position Based on current WP index
-    x_des = wp(1, wp_index);
-    y_des = wp(2, wp_index);
-    z_des = wp(3, wp_index);
+    % x_des = wp(1, wp_index);
+    % y_des = wp(2, wp_index);
+    % z_des = wp(3, wp_index);
 
     % Waypoint controller testing
-    % x_des = 3;
-    % y_des = 3;
-    % z_des = 3;
-    % if norm(e_pos) < wp_rad
-    %     break
-    % end
+    x_des = 3;
+    y_des = 3;
+    z_des = 3;
+    if norm(e_pos) < wp_rad
+        break
+    end
 
     des_pos = [x_des; y_des; z_des];
 
@@ -245,6 +245,16 @@ title("Z Postition")
 xlabel("Time (s)")
 ylabel("Postition (m)")
 legend("Desired", "Actual")
+
+fig = figure;
+plot(time, err_dat(1, :))
+hold on
+plot(time, err_dat(2, :))
+plot(time, err_dat(3, :))
+title("Position Error")
+xlabel("Time (s)")
+ylabel("Postition (m)")
+legend("X", "Y", "Z")
 
 %% Plot Yaw/Heading Controller
 

@@ -4,7 +4,6 @@ import os
 
 def create_wav_file(filename, freq):
     sample_rate = 44100
-    # Generate a buffer that loops smoothly
     duration_target = 0.5 # Longer duration for better quality
     num_cycles = max(1, int(freq * duration_target))
     num_samples = int((sample_rate * num_cycles) / freq)

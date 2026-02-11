@@ -34,9 +34,7 @@ class CreateClass():
         self.des_pos_dat = [] # desired positions over time
         self.des_psi_dat = [] # desired headings over time
 
-        # Zone 1 Limits: X[2.5 to -0.60], Y[0.75 to -1.12]
-        # Zone 2 Limits: X[-0.95 to -1.60], Y[0.65 to -0.32]
-        
+        # Define Desired Path (waypoints) 
         self.p_des = np.array([
             [2.50, 0.75],  [2.50, -1.00],  
             [2.15, -1.12], [2.15, 0.60], 
@@ -141,7 +139,7 @@ class CreateClass():
             msg['pose']['orientation']['w']
         ])
         self.roll, self.pitch, self.yaw = r.as_euler('xyz', degrees=False)
-        self.yaw -= math.pi/2 # adjust for different frame conventions
+        self.yaw -= math.pi/2 # adjust for different frame convention
         self.yaw = self.wrapToPi(self.yaw) # wrap yaw to [-pi, pi]
         # print(f"Pose Update: x={self.x:.2f}, y={self.y:.2f}, yaw={self.yaw:.2f} rad", end="\r", flush=True)
 
@@ -210,6 +208,7 @@ class CreateClass():
         yaw_error = self.wrapToPi(psi_des - psi)
         r_des = self.Kp_yaw * yaw_error # proportional heading control
 
+        # Calculate distance to previous waypoint to determine if we should stop to turn
         x_des_prev = self.p_des[self.wp_num-1, 0]
         y_des_prev = self.p_des[self.wp_num-1, 1]
         x_error_prev = x_des_prev - self.x
@@ -230,14 +229,12 @@ class CreateClass():
         u = max(0,min(u_des,0.306))
         r = max(-1.57,min(r_des,1.57))
 
-        # u = 0.306 # TESTING constant forward speed
-
-        # v. Set the servo and esc command signals must be integers
+        # Set the servo and esc command signals must be integers
         self.control_movement(u, r)
 
         elapsedTime = time.time() - start_time
 
-        # vii. Append data from this time step to arrays add data from this time step to arrays
+        # Append data from this time step to arrays add data from this time step to arrays
         self.time.append(elapsedTime);
         self.des_pos_dat.append([x_des, y_des])
         self.des_psi_dat.append(psi_des);
@@ -264,6 +261,7 @@ class CreateClass():
                         self.joystick = None
                         self.axes = []
                         self.buttons = []
+                        self.is_manual_mode = True # Force manual mode on disconnect
                         self.armed = False # Disarm on disconnect
 
             # Update joystick state
@@ -278,8 +276,10 @@ class CreateClass():
 
                 # Arming logic (A button)
                 if self.buttons[0]:
+                    # Start timer on initial press
                     if self.arm_start_time is None:
                         self.arm_start_time = time.time()
+                    # Check if held long enough to toggle
                     elif (time.time() - self.arm_start_time >= self.hold_duration) and not self.arm_toggled:
                         # Arming is only allowed into manual mode. Disarming is always allowed.
                         if not self.armed and self.is_manual_mode:
@@ -294,14 +294,17 @@ class CreateClass():
                             self.arm_toggled = True
                             self.mode_switch_time = time.time()
                             self.beep([660, 540, 440], [0.2, 0.2, 0.2])
+                # Reset arm timer and toggle state on release
                 else:
                     self.arm_start_time = None
                     self.arm_toggled = False
 
                 # Vehicle mode logic (X button)
                 if self.buttons[2] and self.armed:
+                    # Start timer on initial press
                     if self.mode_start_time is None:
                         self.mode_start_time = time.time()
+                    # Check if held long enough to toggle
                     elif (time.time() - self.mode_start_time >= self.tap_duration) and not self.mode_toggled:
                         self.is_manual_mode = not self.is_manual_mode
                         # status = "MANUAL MODE" if self.is_manual_mode else "AUTONOMOUS MODE"
@@ -314,24 +317,27 @@ class CreateClass():
                             self.beep([660, 660], [0.3, 0.3]) # Higher beep for manual
                         elif not self.is_manual_mode and self.armed:
                             self.beep([360, 360], [0.3, 0.3]) # Lower beep for autonomous
+                # Reset mode timer and toggle state on release 
                 else:
                     self.mode_start_time = None
                     self.mode_toggled = False
 
                 # Vehicle dock logic (Y button)
                 if self.buttons[3]:
+                    # Start timer on initial press
                     if self.dock_start_time is None:
                         self.dock_start_time = time.time()
+                    # Check if held long enough to toggle
                     elif (time.time() - self.dock_start_time >= self.hold_duration) and not self.dock_toggled:
                         self.dock_toggled = True
-
+                        # Toggle between dock and undock based on current state
                         if self.is_docked:
                             # print("\nUndocking...")
                             self.undock_id = self.undock_client.send_goal(roslibpy.Message({}), self.on_result, self.on_feedback, self.on_error)
                         else:
                             # print("\nDocking...")
                             self.dock_id = self.dock_client.send_goal(roslibpy.Message({}), self.on_result, self.on_feedback, self.on_error)
-                        
+                # Reset dock timer and toggle state on release 
                 else:
                     self.dock_start_time = None
                     self.dock_toggled = False
@@ -340,21 +346,18 @@ class CreateClass():
                 if self.joystick and self.is_manual_mode:
                     self.linear_x = self.axes[1] * -1  # Invert Y axis
                     self.angular_z = self.axes[2] * -2 # Invert and scale rotation
-
             time.sleep(0.1)
-        
         pygame.quit()
 
     def update_robot(self):
         while self.running: 
             if self.client.is_connected:
                 self.control_leds()
-
+                # Autonomous waypoint navigation
                 if self.armed and not self.is_manual_mode:
                     self.waypoint_navigation()
                 else:
                     self.control_movement(self.linear_x, self.angular_z)
-
             time.sleep(0.1) # 10 Hz update rate
 
     def mowing_sound(self):
@@ -366,6 +369,7 @@ class CreateClass():
             time.sleep(0.45)
 
     def control_movement(self, linear_x, angular_z):
+        # Only send movement commands if armed
         if self.armed:
             twist = roslibpy.Message({
                 'linear': { 'x': linear_x },
@@ -378,14 +382,12 @@ class CreateClass():
         led_array = []
         if self.armed and self.is_manual_mode:
             led_color = {'red': 0, 'green': 255, 'blue': 0}  # Green for manual mode
-
         elif self.armed and not self.is_manual_mode:
             # Blink yellow: toggle every 0.5 seconds
             if int(time.time() / 0.5) % 2 == 0:
                 led_color = {'red': 255, 'green': 255, 'blue': 0}  # Flashing Yellow for autonomous mode
             else:
                 led_color = {'red': 0, 'green': 0, 'blue': 0}  # Off
-
         else:
             led_color = {'red': 0, 'green': 0, 'blue': 255}  # Blue for Idle
 
@@ -404,6 +406,7 @@ class CreateClass():
 
     def beep(self, frequency=[540], duration=[0.5]):
         notes = []
+        # Create a note for each frequency and duration pair
         for i in range(len(frequency)):
             note = {
                 'frequency': frequency[i],
@@ -417,14 +420,12 @@ class CreateClass():
         self.beep_pub.publish(audio_msg)
 
     def stop(self):
-        # Turn off LEDs
+        # Stop the robot and threads
         led_msg = roslibpy.Message({
             'override_system': False
         })
         self.led_pub.publish(led_msg)
-
         self.running = False
-
         self.read_thread.join()
         self.robot_thread.join()
         self.mowing_sound_thread.join()

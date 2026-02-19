@@ -100,6 +100,7 @@ class CreateClass():
                 {
                     'name': 'safety_override',
                     'value': {
+                        'type': 4, # string type
                         'string_value': 'backup_only'
                     }
                 }

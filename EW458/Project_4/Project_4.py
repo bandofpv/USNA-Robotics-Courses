@@ -29,22 +29,14 @@ class CreateClass():
         self.dock_result = None
         self.is_bumped = False
 
-        # Initialize Empty Arrays to be filled with data for plotting
-        self.time = [] # time array
-        self.pos_dat = [] # position of vehicle over time
-        self.vel_dat = [] # velocity of vehicle over time
-        self.eul_dat = [] # Euler angles of vehicle over time
-        self.ang_vel_dat = [] # angular velocity of vehicle over 
-        self.ctrl_data = [] # robot control commands
-        self.des_pos_dat = [] # desired positions over time
-        self.des_psi_dat = [] # desired headings over time
+        # Initialize empty arrays to be filled with data for plotting
+        self.robot_path = [] # path of robot
         self.des_path = None # path from planner in map frame
         self.p_des = None # path in robot frame
         self.rrt_tree_nodes = None # RRT tree nodes for visualization
 
         # Occupancy grid map (black/white grayscale image)
         self.map = Image.open('Project_4/Occupancy208_100m2p.png').convert('L')
-        #self.map = self.img.transpose(Image.FLIP_LEFT_RIGHT)
         self.base_occupancy_grid = np.array(self.map, dtype=float) / 255.0
         self.occupancy_grid = self.base_occupancy_grid.copy()
 
@@ -53,28 +45,21 @@ class CreateClass():
         self.meters_per_pixel = 0.01 * (245/369) # 100 pixels per meter #=0.0066
         # Mocap origin (pose topic frame) measured from image top-left corner [x_right, y_down] in meters.
         self.origin = [5.3848 + self.map_wall, 3.0988 + self.map_wall] # [x, y] in meters
-
         grid_height, grid_width = self.base_occupancy_grid.shape
         self.map_x_min = -self.origin[0]
         self.map_x_max = self.map_x_min + grid_width * self.meters_per_pixel
         self.map_y_max = self.origin[1]
         self.map_y_min = self.map_y_max - grid_height * self.meters_per_pixel
 
-        # Rectangle obstacles defined from image top-left corner [x_right, y_down] in meters.
-        self.square_obstacles = [
-            [3.0988+self.map_wall, 2.1844+self.map_wall],
-            [5.3848+self.map_wall, 3.2258+self.map_wall],
-            [7.6708+self.map_wall, 2.6416+self.map_wall],
-        ]
-
-        box_poses = [[-0.45, 0.45, 0.0], [-2.74, 0.0, 0.0], [1.6, -0.45, 0.0]]
-        box_dims = [[1, 1] for _ in range(len(box_poses))]  # All boxes have the same dimensions
+        # Define obstacles in the map [x, y, theta] in meters and radians
+        box_poses = [[-0.45, 0.45, 0.0], [-2.74, 0.0, 0.0], [1.85, -0.45, 0.0]] # position of center of object
+        box_dims = [[1, 1] for _ in range(len(box_poses))]  # boxes have the same dimensions
         desk_poses = [[0.225,2.5,np.pi/2],[-0.225,2.5,np.pi/2],[-1.94,2.5,np.pi/2],[-2.63,2.5,np.pi/2],[5.37,-0.45,np.pi/2],[5.37,1.35,np.pi/2],[2.74,2.9,0],[4.57,2.9,0.0]]
-        desk_dims = [[1.83, 0.68] for _ in range(len(desk_poses))]  # All desks have the same dimensions
-        podium_pose = [-2.85,-1.6, 0.0]
+        desk_dims = [[1.83, 0.68] for _ in range(len(desk_poses))]  # desks have the same dimensions
+        podium_pose = [-2.85,-1.6, 0.0] # center of podium
         podium_dims = [1.6, 0.45]  # podium dimensions
 
-        self.robot_radius = 0.2 # m
+        self.robot_radius = 0.175 # m
         self.add_rectangle_obstacles(
             poses=box_poses + desk_poses + [podium_pose],
             dims=box_dims + desk_dims + [podium_dims],
@@ -156,6 +141,7 @@ class CreateClass():
         self.mowing_sound_thread = threading.Thread(target=self.mowing_sound, daemon=True)
         self.mowing_sound_thread.start()
 
+        # Wait for the first pose message to be received before proceeding
         print("Waiting for first pose message...")
         while self.x is None or self.y is None:
             time.sleep(0.01)  # Wait for the first pose message to be received
@@ -214,6 +200,7 @@ class CreateClass():
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
     def add_rectangle_obstacles(self, poses, dims, robot_radius=0):
+        # Create a grid of coordinates corresponding to the occupancy grid
         grid_height, grid_width = self.base_occupancy_grid.shape
         x_coords = np.linspace(self.map_x_min, self.map_x_max, grid_width)
         y_coords = np.linspace(self.map_y_max, self.map_y_min, grid_height)
@@ -221,6 +208,7 @@ class CreateClass():
 
         self.occupancy_grid = self.base_occupancy_grid.copy()
 
+        # Loop through each rectangle and mark the corresponding grid cells as occupied
         for i, (x, y, theta) in enumerate(poses):
             # Calculate the corners of the rectangle based of center position (x, y) and orientation theta
             half_width = dims[i][0] / 2
@@ -245,14 +233,14 @@ class CreateClass():
             contains = path.contains_points(np.vstack((x_grid.flatten(), y_grid.flatten())).T)
             self.occupancy_grid[contains.reshape(x_grid.shape)] = 0.0
 
-        # Inflate obstacles by robot radius if specified
+        # Inflate obstacles by robot radius
         if robot_radius > 0:
             inflation_radius= int(np.ceil(robot_radius / self.meters_per_pixel))
             inflated_obstacles = ndimage.binary_dilation(self.occupancy_grid == 0.0, iterations=inflation_radius)
             self.occupancy_grid[inflated_obstacles] = 0.0
 
-    def compute_rrt_path(self, goal=[-4.0, 2.0]):
-        start_pos = [-self.x, -self.y]
+    def compute_rrt_path(self, goal=[-4.0, 2.0], expand_dis=0.25, max_iter=5000):
+        start_pos = [-self.x, -self.y] # start position is where robot is located when RRT is started
         map_params_config = {
             'res': self.meters_per_pixel,
             'x_limit': [self.map_x_min, self.map_x_max],
@@ -263,16 +251,17 @@ class CreateClass():
                         goal=goal, 
                         map_grid=self.occupancy_grid, 
                         map_params=map_params_config, 
-                        expand_dis=0.25, 
-                        max_iter=5000) 
+                        expand_dis=expand_dis, 
+                        max_iter=max_iter) 
         
+        # Run the RRT planning algorithm
         path_result = planner.plan()
         self.rrt_tree_nodes = np.array(planner.tree)
         
+        # If a path is found, store it and negate the waypoints to match the robot's coordinate frame
         if path_result is not None:
             self.des_path = np.array(path_result)
-            # Negate waypoints to match the robot's actual coordinate frame for navigation.
-            self.p_des = -self.des_path
+            self.p_des = -self.des_path # negate waypoints to match the robot's actual coordinate frame for navigation
             self.numWypts = len(self.p_des)
             print(f"Path found with {self.numWypts} waypoints")
         else: 
@@ -281,14 +270,14 @@ class CreateClass():
             # self.stop()  # Stop the robot and threads if no path is found
 
     def waypoint_navigation(self):
+        # If no desired path is set, compute a new RRT path to the goal
         if self.p_des is None:
             self.compute_rrt_path(goal=[5.0, 0.0])
-
-        start_time = time.time()
 
         # Switch to manual mode if all waypoints reached or if bumped
         if self.wp_num >= self.numWypts:
             u_des = 0; r_des = 0
+            self.robot_path = []
             self.p_des = None
             self.des_path = None
             self.rrt_tree_nodes = None
@@ -299,8 +288,10 @@ class CreateClass():
             print("All waypoints reached.")
             return
 
+        # If the robot is bumped, stop movement and switch to manual mode
         if self.is_bumped:
             u_des = 0; r_des = 0
+            self.robot_path = []
             self.p_des = None
             self.des_path = None
             self.rrt_tree_nodes = None
@@ -314,7 +305,6 @@ class CreateClass():
         # Set Desired Position (waypoint location at time t)
         x_des = self.p_des[self.wp_num, 0]
         y_des = self.p_des[self.wp_num, 1]
-        # print(f"Navigating to waypoint {self.wp_num}: ({x_des}, {y_des})")
 
         # -------------------- Waypoint Control ------------------
 
@@ -325,9 +315,6 @@ class CreateClass():
         dist2wp = math.sqrt(x_error**2 + y_error**2)
         u_des = self.Kp_speed*dist2wp # proportional forward speed control
 
-        # print(f"\nCurrent Position: ({self.x:.2f}, {self.y:.2f}), Desired Position: ({x_des:.2f}, {y_des:.2f}), Distance to Waypoint: {dist2wp:.2f} m")
-
-        # -------------------------------------------------------
         # -----------------Speed Control -----------------------
 
         psi = self.yaw
@@ -344,8 +331,6 @@ class CreateClass():
         else:
             dist2wp_prev = 0 # No previous waypoint, assume we are at it
 
-        # print(f"Current Heading: {self.yaw:.2f} rad, Desired Heading: {psi_des:.2f} rad, Yaw Error: {yaw_error:.2f} rad")
-
         # Don't move forward until facing right direction
         if abs(yaw_error) > self.yaw_thresh and dist2wp_prev < self.wp_rad:
             u_des = 0
@@ -361,16 +346,8 @@ class CreateClass():
         # Set the servo and esc command signals must be integers
         self.control_movement(u, r)
 
-        elapsedTime = time.time() - start_time
+        self.robot_path.append([-self.x, -self.y]) # store robot path for plotting
 
-        # Append data from this time step to arrays add data from this time step to arrays
-        self.time.append(elapsedTime);
-        self.des_pos_dat.append([x_des, y_des])
-        self.des_psi_dat.append(psi_des);
-        self.pos_dat.append([self.x, self.y]);
-        self.eul_dat.append(self.yaw);
-        self.ctrl_data.append([u,r]);
-        
     def read_joystick(self):
         pygame.init()
         pygame.joystick.init()
@@ -487,6 +464,10 @@ class CreateClass():
                     self.waypoint_navigation()
                 else:
                     self.control_movement(self.linear_x, self.angular_z)
+                    self.robot_path = []
+                    self.p_des = None
+                    self.des_path = None
+                
             time.sleep(0.1) # 10 Hz update rate
 
     def mowing_sound(self):
@@ -550,7 +531,6 @@ class CreateClass():
 
     def plot_occupancy_grid(self):
         self.ax.cla()
-
         self.ax.imshow(
             self.occupancy_grid,
             extent=[self.map_x_min, self.map_x_max, self.map_y_min, self.map_y_max],
@@ -563,11 +543,6 @@ class CreateClass():
         # Plot mocap origin.
         self.ax.plot(0.0, 0.0, 'b*', markersize=10)
 
-        # Plot robot position if available
-        if self.x is not None and self.y is not None:
-            self.ax.plot(-self.x, -self.y, 'ro', markersize=5)
-            self.ax.arrow(-self.x, -self.y, -0.5 * math.cos(self.yaw), -0.5 * math.sin(self.yaw), head_width=0.1, head_length=0.1, fc='r', ec='r')
-        
         # Plot RRT tree nodes if available
         if self.rrt_tree_nodes is not None and len(self.rrt_tree_nodes) > 0:
             self.ax.plot(self.rrt_tree_nodes[:, 0], self.rrt_tree_nodes[:, 1], 'c.', markersize=2)
@@ -584,6 +559,16 @@ class CreateClass():
             # Highlight current target waypoint
             if self.wp_num < len(self.des_path):
                 self.ax.plot(self.des_path[self.wp_num, 0], self.des_path[self.wp_num, 1], 'y.', markersize=10)
+
+        # Plot robot position if available
+        if self.x is not None and self.y is not None:
+            self.ax.plot(-self.x, -self.y, 'ro', markersize=5)
+            self.ax.arrow(-self.x, -self.y, -0.5 * math.cos(self.yaw), -0.5 * math.sin(self.yaw), head_width=0.1, head_length=0.1, fc='r', ec='r')
+        
+        # Plot robot path if available
+        if len(self.robot_path) > 0:
+            robot_path_array = np.array(self.robot_path)
+            self.ax.plot(robot_path_array[:, 0], robot_path_array[:, 1], 'r-', linewidth=1)
 
         # Keep display size and axis limits static.
         self.ax.set_xlim(self.map_x_min, self.map_x_max)

@@ -9,7 +9,7 @@ from PIL import Image
 from scipy.spatial.transform import Rotation as R
 
 class CreateClass():
-    def __init__(self, id=86, origin_x_m=0.0, origin_y_m=0.0):
+    def __init__(self, id=86):
         # Joystic variables
         self.joystick = None
         self.axes = []
@@ -83,14 +83,13 @@ class CreateClass():
         self.roll = None; self.pitch = None; self.yaw = None
 
         # Lidar variables
-        self.grid_size = 0.01  # 100 pixels = 1 meter -> 0.01 m per pixel
-
-        self.map = Image.open('Occupancy208_100m2p.png').convert('L') # Load map image and convert to grayscale
-        self.map_data = np.array(self.map) / 255.0 # Normalize pixel values to [0, 1]
-        self.base_occupancy_grid = self.map_data.copy()
-        self.occupancy_grid = self.base_occupancy_grid.copy()
-        self.origin_x_m = origin_x_m
-        self.origin_y_m = origin_y_m
+        self.x_min = -10; self.x_max = 10; self.y_min = -5; self.y_max = 5
+        self.grid_size = 0.1
+        n_x = (self.x_max - self.x_min) / self.grid_size
+        n_y = (self.y_max - self.y_min) / self.grid_size
+        X = np.linspace(self.x_min, self.x_max, int(n_x))
+        Y = np.linspace(self.y_min, self.y_max, int(n_y))
+        self.occupancy_grid = np.zeros((int(n_y), int(n_x)))
         self.x_scan_global = np.array([])
         self.y_scan_global = np.array([])
 
@@ -111,9 +110,12 @@ class CreateClass():
         self.lidar_sub = roslibpy.Topic(self.client, f'/create_{self.id}/scan', 'sensor_msgs/LaserScan')
         self.dock_sub.subscribe(self.dock_callback)
         self.hazard_sub.subscribe(self.hazard_callback)
-        # self.pose_sub.subscribe(self.pose_callback)
-        self.odom_sub.subscribe(self.odom_callback)
+        self.pose_sub.subscribe(self.pose_callback)
+        # self.odom_sub.subscribe(self.odom_callback)
         self.lidar_sub.subscribe(self.lidar_callback)
+
+        # ROS Publishers
+        self.occupancy_grid_pub = roslibpy.Topic(self.client, f'/create_{self.id}/occupancy_grid', 'nav_msgs/OccupancyGrid')
 
         # Safety Override Service
         saftey_service = roslibpy.Service(self.client, f'/create_{self.id}/motion_control/set_parameters', 'rcl_interfaces/srv/SetParameters')
@@ -215,18 +217,51 @@ class CreateClass():
         self.R_BG = np.array([[math.cos(self.yaw), -math.sin(self.yaw)], [math.sin(self.yaw), math.cos(self.yaw)]])
         P_G = self.R_BG @ np.array([self.x_scan, self.y_scan]) + np.array([[self.x], [self.y]])
 
-        P_G[0, :] += self.origin_x_m
-        P_G[1, :] += self.origin_y_m
         self.x_scan_global = P_G[0, :]
         self.y_scan_global = P_G[1, :]
 
+        # Clear all cells the laser passes through (ray tracing)
+        dx = self.x_scan_global - self.x
+        dy = self.y_scan_global - self.y
+        distances = np.sqrt(dx**2 + dy**2)
+        N_list = distances / self.grid_size
+        max_steps = int(np.ceil(np.max(N_list))) if N_list.size > 0 else 0
+        
+        for step in range(max_steps):
+            # Only step through a ray strictly up to the obstacle hits
+            mask = step < (N_list - 0.5) 
+            if not np.any(mask): break
+            
+            t = step / N_list[mask]
+            x = self.x + dx[mask] * t
+            y = self.y + dy[mask] * t
+            
+            i = ((x - self.x_min) / self.grid_size).astype(int)
+            j = ((y - self.y_min) / self.grid_size).astype(int)
+            
+            valid_idx = (i >= 0) & (i < self.occupancy_grid.shape[1]) & (j >= 0) & (j < self.occupancy_grid.shape[0])
+            self.occupancy_grid[j[valid_idx], i[valid_idx]] = 0.0
+
+        # Mark the cells corresponding to the laser scan points as occupied
+        i = ((self.x_scan_global - self.x_min) / self.grid_size).astype(int)
+        j = ((self.y_scan_global - self.y_min) / self.grid_size).astype(int)
+        valid_idx = (i >= 0) & (i < self.occupancy_grid.shape[1]) & (j >= 0) & (j < self.occupancy_grid.shape[0])
+        self.occupancy_grid[j[valid_idx], i[valid_idx]] = 1.0
+
         grid_height, grid_width = self.occupancy_grid.shape
-        x_half = (grid_width * self.grid_size) / 2.0
-        y_half = (grid_height * self.grid_size) / 2.0
-        x_idx = ((P_G[0, :] + x_half) / self.grid_size).astype(int)
-        y_idx = ((P_G[1, :] + y_half) / self.grid_size).astype(int)
-        valid_idx = (x_idx >= 0) & (x_idx < grid_width) & (y_idx >= 0) & (y_idx < grid_height)
-        self.occupancy_grid[y_idx[valid_idx], x_idx[valid_idx]] = 0.0
+        occupancy_msg = roslibpy.Message({
+            'header': {
+                'stamp': roslibpy.Time.now(),
+                'frame_id': 'map'
+            },
+            'info': {
+                'width': grid_width,
+                'height': grid_height,
+                'resolution': self.grid_size,
+            },
+            'data': self.occupancy_grid.flatten().tolist()
+        })
+        self.occupancy_grid_pub.publish(occupancy_msg)
 
     def on_result(self, result):
         self.dock_result = result
@@ -256,10 +291,6 @@ class CreateClass():
 
     def wrapToPi(self, angle):
         return (angle + math.pi) % (2 * math.pi) - math.pi
-
-    def set_origin(self, origin_x_m, origin_y_m):
-        self.origin_x_m = origin_x_m
-        self.origin_y_m = origin_y_m
 
     def waypoint_navigation(self):
         start_time = time.time()
@@ -454,7 +485,6 @@ class CreateClass():
                     self.waypoint_navigation()
                 else:
                     self.control_movement(self.linear_x, self.angular_z)
-                # self.plot_scan()
             time.sleep(0.1) # 10 Hz update rate
 
     def mowing_sound(self):
@@ -518,12 +548,15 @@ class CreateClass():
 
     def plot_scan(self):
         plt.clf()
-        grid_height, grid_width = self.base_occupancy_grid.shape
+        grid_height, grid_width = self.occupancy_grid.shape
         x_half = (grid_width * self.grid_size) / 2
         y_half = (grid_height * self.grid_size) / 2
         plt.imshow(self.occupancy_grid, extent=[-x_half, x_half, -y_half, y_half], origin='lower', cmap='Greys')
         if self.x_scan_global.size and self.y_scan_global.size:
             plt.plot(self.x_scan_global, self.y_scan_global, 'b.', markersize=1)
+        if self.x is not None and self.y is not None:
+            plt.plot(self.x, self.y, 'ro', markersize=5)  # Robot position
+            plt.arrow(self.x, self.y, 0.5 * math.cos(self.yaw), 0.5 * math.sin(self.yaw), head_width=0.1, head_length=0.1, fc='r', ec='r')  # Robot heading
         plt.xlim(-x_half, x_half)
         plt.ylim(-y_half, y_half)
         plt.xlabel('X (m)')
@@ -544,7 +577,7 @@ class CreateClass():
         self.mowing_sound_thread.join()
 
 if __name__ == "__main__":
-    js = CreateClass(origin_x_m=0.0, origin_y_m=0.0)
+    js = CreateClass()
     print("Main script running. Press Ctrl+C to stop.")
 
     try:

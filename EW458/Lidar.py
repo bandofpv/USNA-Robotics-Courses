@@ -5,10 +5,11 @@ import threading
 import roslibpy
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image
 from scipy.spatial.transform import Rotation as R
 
 class CreateClass():
-    def __init__(self, id=86):
+    def __init__(self, id=86, origin_x_m=0.0, origin_y_m=0.0):
         # Joystic variables
         self.joystick = None
         self.axes = []
@@ -82,8 +83,20 @@ class CreateClass():
         self.roll = None; self.pitch = None; self.yaw = None
 
         # Lidar variables
-        self.occupancy_grid = np.zeros((100, 100))
-        self.grid_size = 0.1  # Size of each grid cell in meters
+        self.grid_size = 0.01  # 100 pixels = 1 meter -> 0.01 m per pixel
+
+        self.map = Image.open('Occupancy208_100m2p.png').convert('L') # Load map image and convert to grayscale
+        self.map_data = np.array(self.map) / 255.0 # Normalize pixel values to [0, 1]
+        self.base_occupancy_grid = self.map_data.copy()
+        self.occupancy_grid = self.base_occupancy_grid.copy()
+        self.origin_x_m = origin_x_m
+        self.origin_y_m = origin_y_m
+        self.x_scan_global = np.array([])
+        self.y_scan_global = np.array([])
+
+        # Matplotlib figure for plotting and close handler
+        self.fig = plt.figure()
+        self.fig.canvas.mpl_connect('close_event', self.on_plot_close)
 
         # ROS Topics
         self.cmd_vel_pub = roslibpy.Topic(self.client, f'/create_{self.id}/cmd_vel', 'geometry_msgs/Twist')
@@ -94,10 +107,12 @@ class CreateClass():
         self.hazard_sub = roslibpy.Topic(self.client, f'/create_{self.id}/hazard_detection', 'irobot_create_msgs/HazardDetectionVector')
         self.dock_sub = roslibpy.Topic(self.client, f'/create_{self.id}/dock_status', 'irobot_create_msgs/DockStatus')
         self.pose_sub = roslibpy.Topic(self.client, f'/create_{self.id}/pose', 'geometry_msgs/PoseStamped')
+        self.odom_sub = roslibpy.Topic(self.client, f'/create_{self.id}/odom', 'nav_msgs/Odometry')
         self.lidar_sub = roslibpy.Topic(self.client, f'/create_{self.id}/scan', 'sensor_msgs/LaserScan')
         self.dock_sub.subscribe(self.dock_callback)
         self.hazard_sub.subscribe(self.hazard_callback)
-        self.pose_sub.subscribe(self.pose_callback)
+        # self.pose_sub.subscribe(self.pose_callback)
+        self.odom_sub.subscribe(self.odom_callback)
         self.lidar_sub.subscribe(self.lidar_callback)
 
         # Safety Override Service
@@ -114,6 +129,16 @@ class CreateClass():
             ]
         })
         saftey_service.call(override_request)
+        
+        # Reset Odometry Service
+        reset_odom_service = roslibpy.Service(self.client, f'/create_{self.id}/reset_pose', 'irobot_create_msgs/srv/ResetPose')
+        reset_odom_request = roslibpy.ServiceRequest({
+            'pose': {
+                'position': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}
+            }
+        })
+        reset_odom_service.call(reset_odom_request)
 
         # ROS Action Clients
         self.dock_client = roslibpy.ActionClient(self.client, f'/create_{self.id}/dock', 'irobot_create_msgs/Dock')
@@ -126,6 +151,19 @@ class CreateClass():
         self.robot_thread.start()
         self.mowing_sound_thread = threading.Thread(target=self.mowing_sound, daemon=True)
         self.mowing_sound_thread.start()
+
+    def odom_callback(self, msg):
+        self.x = msg['pose']['pose']['position']['x']
+        self.y = msg['pose']['pose']['position']['y']
+        self.z = msg['pose']['pose']['position']['z']
+        r = R.from_quat([
+            msg['pose']['pose']['orientation']['x'],
+            msg['pose']['pose']['orientation']['y'],
+            msg['pose']['pose']['orientation']['z'],
+            msg['pose']['pose']['orientation']['w']
+        ])
+        self.roll, self.pitch, self.yaw = r.as_euler('xyz', degrees=False)
+        # print(f"Pose Update: x={self.x:.2f}, y={self.y:.2f}, yaw={self.yaw:.2f} rad", end="\r", flush=True)
 
     def hazard_callback(self, msg):
         # print(f"Hazard Detection: {msg}")
@@ -157,6 +195,15 @@ class CreateClass():
         # Calculate angles for valid ranges only
         angles = np.linspace(msg['angle_min'], msg['angle_max'], len(msg['ranges']))
 
+        valid_ranges = np.isfinite(ranges)
+        valid_ranges &= (ranges >= msg['range_min'])
+        valid_ranges &= (ranges <= msg['range_max'])
+        ranges = ranges[valid_ranges]
+        angles = angles[valid_ranges]
+
+        if ranges.size == 0:
+            return
+
         # Convert to Cartesian coordinates in Body Frame
         self.x_scan = ranges * np.cos(angles)
         self.y_scan = ranges * np.sin(angles)
@@ -165,16 +212,21 @@ class CreateClass():
         if self.x is None or self.y is None or self.yaw is None:
             return
 
-        # self.R_BG = np.array([[math.cos(self.yaw), -math.sin(self.yaw)], [math.sin(self.yaw), math.cos(self.yaw)]])
-        
-        # P_G = self.R_BG @ np.array([self.x_scan, self.y_scan]) + np.array([[self.x], [self.y]])
+        self.R_BG = np.array([[math.cos(self.yaw), -math.sin(self.yaw)], [math.sin(self.yaw), math.cos(self.yaw)]])
+        P_G = self.R_BG @ np.array([self.x_scan, self.y_scan]) + np.array([[self.x], [self.y]])
 
-        # # Update Occupancy Grid
-        # for i in range(P_G.shape[1]):
-        #     x_idx = int((P_G[0, i] + 5.0) / self.grid_size)
-        #     y_idx = int((P_G[1, i] + 5.0) / self.grid_size)
-        #     if 0 <= x_idx < self.occupancy_grid.shape[1] and 0 <= y_idx < self.occupancy_grid.shape[0]:
-        #         self.occupancy_grid[y_idx, x_idx] = 1.0
+        P_G[0, :] += self.origin_x_m
+        P_G[1, :] += self.origin_y_m
+        self.x_scan_global = P_G[0, :]
+        self.y_scan_global = P_G[1, :]
+
+        grid_height, grid_width = self.occupancy_grid.shape
+        x_half = (grid_width * self.grid_size) / 2.0
+        y_half = (grid_height * self.grid_size) / 2.0
+        x_idx = ((P_G[0, :] + x_half) / self.grid_size).astype(int)
+        y_idx = ((P_G[1, :] + y_half) / self.grid_size).astype(int)
+        valid_idx = (x_idx >= 0) & (x_idx < grid_width) & (y_idx >= 0) & (y_idx < grid_height)
+        self.occupancy_grid[y_idx[valid_idx], x_idx[valid_idx]] = 0.0
 
     def on_result(self, result):
         self.dock_result = result
@@ -195,8 +247,19 @@ class CreateClass():
         self.dock_id = None
         self.undock_id = None
 
+    def on_plot_close(self, event):
+        print("\nPlot window closed. Stopping...")
+        try:
+            self.stop()
+        except Exception as e:
+            print(f"Error during stop: {e}")
+
     def wrapToPi(self, angle):
         return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def set_origin(self, origin_x_m, origin_y_m):
+        self.origin_x_m = origin_x_m
+        self.origin_y_m = origin_y_m
 
     def waypoint_navigation(self):
         start_time = time.time()
@@ -454,19 +517,20 @@ class CreateClass():
         self.beep_pub.publish(audio_msg)
 
     def plot_scan(self):
-        if hasattr(self, 'x_scan') and hasattr(self, 'y_scan'):
-            plt.clf()
-            plt.plot(self.x_scan, self.y_scan, 'b.')
-            plt.imshow(self.occupancy_grid, extent=[-5, 5, -5, 5], origin='lower', cmap='Greys', alpha=0.5)
-            # plt.plot(self.x, self.y, 'ro', label='Robot Position')
-            # plt.arrow(self.x, self.y, 0.5*np.cos(self.yaw), 0.5*np.sin(self.yaw), head_width=0.1, head_length=0.1, fc='r', ec='r')
-            plt.xlim(-5, 5)
-            plt.ylim(-5, 5)
-            plt.xlabel('X (m)')
-            plt.ylabel('Y (m)')
-            plt.title('Lidar Scan')
-            plt.grid()
-            plt.pause(0.01) 
+        plt.clf()
+        grid_height, grid_width = self.base_occupancy_grid.shape
+        x_half = (grid_width * self.grid_size) / 2
+        y_half = (grid_height * self.grid_size) / 2
+        plt.imshow(self.occupancy_grid, extent=[-x_half, x_half, -y_half, y_half], origin='lower', cmap='Greys')
+        if self.x_scan_global.size and self.y_scan_global.size:
+            plt.plot(self.x_scan_global, self.y_scan_global, 'b.', markersize=1)
+        plt.xlim(-x_half, x_half)
+        plt.ylim(-y_half, y_half)
+        plt.xlabel('X (m)')
+        plt.ylabel('Y (m)')
+        plt.title('Occupancy Grid')
+        plt.grid()
+        plt.pause(0.01)
 
     def stop(self):
         # Stop the robot and threads
@@ -480,11 +544,11 @@ class CreateClass():
         self.mowing_sound_thread.join()
 
 if __name__ == "__main__":
-    js = CreateClass()
+    js = CreateClass(origin_x_m=0.0, origin_y_m=0.0)
     print("Main script running. Press Ctrl+C to stop.")
 
     try:
-        while True:
+        while js.running:
             if js.joystick:
                 # Formatting for cleaner console output
                 axes_str = [f"{val:5.2f}" for val in js.axes]

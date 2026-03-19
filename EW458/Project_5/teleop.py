@@ -23,16 +23,6 @@ class CreateClass():
         self.dock_result = None
         self.is_bumped = False
 
-        # Initialize Empty Arrays to be filled with data for plotting
-        self.time = [] # time array
-        self.pos_dat = [] # position of vehicle over time
-        self.vel_dat = [] # velocity of vehicle over time
-        self.eul_dat = [] # Euler angles of vehicle over time
-        self.ang_vel_dat = [] # angular velocity of vehicle over 
-        self.ctrl_data = [] # robot control commands
-        self.des_pos_dat = [] # desired positions over time
-        self.des_psi_dat = [] # desired headings over time
-
         # Toggle state variables
         self.arm_start_time = None
         self.mode_start_time = None

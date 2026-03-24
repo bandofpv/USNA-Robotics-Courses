@@ -7,7 +7,10 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 class CreateClass():
-    def __init__(self, id=86):
+    def __init__(self, turn_scale=1.0, id=86):
+        # Turn scale allows you to adjust how aggressively the robot turns in response to joystick input
+        self.turn_scale = turn_scale
+
         # Joystic variables
         self.joystick = None
         self.axes = []
@@ -184,7 +187,7 @@ class CreateClass():
                 # Update movement commands
                 if self.joystick and self.armed:
                     self.linear_x = self.axes[1] * -1  # Invert Y axis
-                    self.angular_z = self.axes[2] * -2 # Invert and scale rotation
+                    self.angular_z = self.axes[2] * -self.turn_scale  # Invert and scale rotation
             time.sleep(0.1)
         pygame.quit()
 
@@ -251,7 +254,7 @@ class CreateClass():
         self.robot_thread.join()
 
 if __name__ == "__main__":
-    js = CreateClass()
+    js = CreateClass(turn_scale=0.2, id=86)  # Adjust turn_scale and id as needed
     print("Main script running. Press Ctrl+C to stop.")
 
     try:

@@ -6,14 +6,17 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 
 class MapClass():
-    def __init__(self, source, plot_map=False, id=86):
+    def __init__(self, source, plot_map=False, id=86, id_mapping=86):
         self.plot_map = plot_map
         self.running = True
         
         # ROS variables
         self.id = id
+        self.id_mapping = id_mapping
         self.client = roslibpy.Ros(host=f'10.24.6.{self.id}', port=9090)
+        self.mapping_client = roslibpy.Ros(host=f'10.24.6.{self.id_mapping}', port=9090)
         self.client.run()
+        self.mapping_client.run()
         self.x = None; self.y = None; self.z = None
         self.roll = None; self.pitch = None; self.yaw = None
         self.pose_time = None; self.lidar_time = None
@@ -56,7 +59,7 @@ class MapClass():
         self.lidar_sub.subscribe(self.lidar_callback)
 
         # ROS Publishers
-        self.occupancy_grid_pub = roslibpy.Topic(self.client, f'/create_{self.id}/occupancy_grid', 'nav_msgs/OccupancyGrid')
+        self.occupancy_grid_pub = roslibpy.Topic(self.mapping_client, f'/create_{self.id_mapping}/occupancy_grid', 'nav_msgs/OccupancyGrid')
 
     def odom_callback(self, msg):
         self.pose_time = msg['header']['stamp']['sec'] + msg['header']['stamp']['nanosec'] * 1e-9 
@@ -193,6 +196,7 @@ class MapClass():
         self.running = False
         try:
             self.client.terminate()
+            self.mapping_client.terminate()
         except Exception as e:
             print(f"Error during stop: {e}")
 
@@ -219,7 +223,7 @@ class MapClass():
         plt.pause(0.01)
 
 if __name__ == "__main__":
-    map = MapClass('mocap', plot_map=False, id=86)
+    map = MapClass('mocap', plot_map=True, id=86, id_mapping=86)
     print("Main script running. Press Ctrl+C to stop.")
 
     try: 

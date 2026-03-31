@@ -12,7 +12,7 @@ from scipy import ndimage
 from scipy.spatial.transform import Rotation as R
 
 class CreateClass():
-    def __init__(self, id=86):
+    def __init__(self, id=86, map_id=81):
         # Joystic variables
         self.joystick = None
         self.axes = []
@@ -35,6 +35,12 @@ class CreateClass():
         self.p_des = None # path in robot frame
         self.rrt_tree_nodes = None # RRT tree nodes for visualization
         self.numWypts = 0 # number of waypoints in path
+        
+        # Initialize timing variables for performance analysis
+        self.rrt_start_time = None
+        self.rrt_end_time = None
+        self.pose_data = []
+        self.des_pose_data = []
 
         # Occupancy grid map variables
         self.occupancy_grid = None
@@ -70,12 +76,16 @@ class CreateClass():
 
         # ROS variables
         self.id = id
+        self.map_id = map_id
         self.client = roslibpy.Ros(host=f'10.24.6.{self.id}', port=9090)
         self.client.run()
+        self.map_client = roslibpy.Ros(host=f'10.24.6.{self.map_id}', port=9090)
+        self.map_client.run()
         self.linear_x = 0.0
         self.angular_z = 0.0
         self.x = None; self.y = None; self.z = None
         self.roll = None; self.pitch = None; self.yaw = None
+        self.map_x = None; self.map_y = None; self.map_z = None
 
         # ROS Topics
         self.cmd_vel_pub = roslibpy.Topic(self.client, f'/create_{self.id}/cmd_vel', 'geometry_msgs/Twist')
@@ -86,11 +96,13 @@ class CreateClass():
         self.hazard_sub = roslibpy.Topic(self.client, f'/create_{self.id}/hazard_detection', 'irobot_create_msgs/HazardDetectionVector')
         self.dock_sub = roslibpy.Topic(self.client, f'/create_{self.id}/dock_status', 'irobot_create_msgs/DockStatus')
         self.pose_sub = roslibpy.Topic(self.client, f'/create_{self.id}/pose', 'geometry_msgs/PoseStamped')
-        self.og_sub = roslibpy.Topic(self.client, f'/create_{self.id}/occupancy_grid', 'nav_msgs/OccupancyGrid')
+        self.map_pos_sub = roslibpy.Topic(self.map_client, f'/create_{self.map_id}/pose', 'geometry_msgs/PoseStamped')
+        self.map_og_sub = roslibpy.Topic(self.map_client, f'/create_{self.map_id}/occupancy_grid', 'nav_msgs/OccupancyGrid')
         self.dock_sub.subscribe(self.dock_callback)
         self.hazard_sub.subscribe(self.hazard_callback)
         self.pose_sub.subscribe(self.pose_callback)
-        self.og_sub.subscribe(self.map_callback)
+        self.map_pos_sub.subscribe(self.map_pose_callback)
+        self.map_og_sub.subscribe(self.map_occupancy_callback)
 
         # Safety Override Service
         saftey_service = roslibpy.Service(self.client, f'/create_{self.id}/motion_control/set_parameters', 'rcl_interfaces/srv/SetParameters')
@@ -148,7 +160,14 @@ class CreateClass():
         self.yaw = self.wrapToPi(self.yaw) # wrap yaw to [-pi, pi]
         # print(f"Pose Update: x={self.x:.2f}, y={self.y:.2f}, yaw={self.yaw:.2f} rad", end="\r", flush=True)
 
-    def map_callback(self, msg):
+    def map_pose_callback(self, msg):
+        self.map_x = msg['pose']['position']['x']
+        self.map_y = msg['pose']['position']['y']
+        self.map_z = msg['pose']['position']['z']
+
+        # print(f"Pose Update: x={self.map_x:.2f}, y={self.map_y:.2f}", end="\r", flush=True)
+
+    def map_occupancy_callback(self, msg):
         self.width = msg['info']['width']
         self.height = msg['info']['height']
         self.grid_size = msg['info']['resolution']
@@ -195,7 +214,10 @@ class CreateClass():
     def wrapToPi(self, angle):
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
-    def compute_rrt_path(self, goal=[-4.0, 2.0], expand_dis=0.25, max_iter=5000):
+    def compute_rrt_path(self, goal, expand_dis=0.25, max_iter=5000):
+        if goal is None:
+            goal = [self.map_x, self.map_y] # update goal to latest position of robot in map frame
+
         start_pos = [self.x, self.y] # start position is where robot is located when RRT is started
         map_params_config = {
             'res': self.grid_size,
@@ -228,7 +250,7 @@ class CreateClass():
     def waypoint_navigation(self):
         # If no desired path is set, compute a new RRT path to the goal
         if self.p_des is None:
-            self.compute_rrt_path(goal=[-5.0, 0.0])
+            self.compute_rrt_path(goal=None) # use latest position as goal if none provided
 
         # Switch to manual mode if all waypoints reached or if bumped
         if self.wp_num >= self.numWypts:
@@ -270,7 +292,7 @@ class CreateClass():
         psi_des = math.atan2(y_error, x_error) # calculated desired heading
         dist2wp = math.sqrt(x_error**2 + y_error**2)
         u_des = self.Kp_speed*dist2wp # proportional forward speed control
-
+        
         # -----------------Speed Control -----------------------
 
         psi = self.yaw
@@ -302,6 +324,9 @@ class CreateClass():
         # Set the servo and esc command signals must be integers
         self.control_movement(u, r)
 
+        # Store data for plotting and analysis
+        self.pose_data.append([self.x, self.y, self.yaw])
+        self.des_pose_data.append([x_des, y_des, psi_des])
         self.robot_path.append([self.x, self.y]) # store robot path for plotting
 
     def read_joystick(self):
@@ -418,6 +443,10 @@ class CreateClass():
                 # Autonomous waypoint navigation
                 if self.armed and not self.is_manual_mode:
                     self.waypoint_navigation()
+
+                    if self.rrt_start_time is None:
+                        self.rrt_start_time = time.time() # start RRT timer on first autonomous action
+                    self.rrt_end_time = time.time() # update RRT end time
                 else:
                     self.control_movement(self.linear_x, self.angular_z)
                     self.robot_path = []
@@ -486,6 +515,9 @@ class CreateClass():
         self.beep_pub.publish(audio_msg)
 
     def plot_occupancy_grid(self):
+        if self.occupancy_grid is None:
+            return
+
         self.ax.cla()
         self.ax.imshow(
             self.occupancy_grid,
@@ -497,7 +529,7 @@ class CreateClass():
         )
 
         # Plot mocap origin.
-        self.ax.plot(0.0, 0.0, 'b*', markersize=10)
+        # self.ax.plot(0.0, 0.0, 'b*', markersize=10)
 
         # Plot RRT tree nodes if available
         if self.rrt_tree_nodes is not None and len(self.rrt_tree_nodes) > 0:
@@ -520,6 +552,10 @@ class CreateClass():
         if self.x is not None and self.y is not None:
             self.ax.plot(self.x, self.y, 'ro', markersize=5)
             self.ax.arrow(self.x, self.y, 0.5 * math.cos(self.yaw), 0.5 * math.sin(self.yaw), head_width=0.1, head_length=0.1, fc='r', ec='r')
+
+        # Plot mapping robot position if available
+        if self.map_x is not None and self.map_y is not None:
+            self.ax.plot(self.map_x, self.map_y, 'bx', markersize=5)
         
         # Plot robot path if available
         if len(self.robot_path) > 0:
@@ -548,11 +584,45 @@ class CreateClass():
         self.running = False
         self.read_thread.join()
         self.robot_thread.join()
-        self.mowing_sound_thread.join()
+        # self.mowing_sound_thread.join()
         plt.close('all')
 
+    def plot_results(self):
+        if len(self.pose_data) > 0 and len(self.des_pose_data) > 0:
+            posistion_error = np.linalg.norm(pose_arr[:, :2] - des_pose_arr[:, :2], axis=1)
+            yaw_error = np.abs(self.wrapToPi(pose_arr[:, 2] - des_pose_arr[:, 2]))
+            travel_time = self.rrt_end_time - self.rrt_start_time if self.rrt_start_time and self.rrt_end_time else 0
+            distance_to_goal = self.des_path[-1] - np.array([self.x, self.y]) if self.des_path is not None else np.array([0, 0])
+            print(f"Average Position Error: {np.mean(posistion_error):.3f} m")
+            print(f"Average Yaw Error: {math.degrees(np.mean(yaw_error)):.2f} degrees")
+            print(f"Travel Time: {travel_time:.2f} s")
+            print(f"Distance to Goal: {np.linalg.norm(distance_to_goal):.3f} m")
+
+            # Calculate closest distance between robot path and obstacles
+            x_obs = [u**self.grid_size + self.map_x_min for u in range(self.width) for v in range(self.height) if self.occupancy_grid[v, u] <= 0.0]
+            y_obs = [v**self.grid_size + self.map_y_min for u in range(self.width) for v in range(self.height) if self.occupancy_grid[v, u] <= 0.0]
+            obs_points = np.array(list(zip(x_obs, y_obs)))
+            distance_to_obstacles = np.min(np.linalg.norm(obs_points[:, np.newaxis] - self.pose_arr[:, :2], axis=2), axis=0)
+            print(f"Minimum Distance to Obstacles: {np.min(distance_to_obstacles):.3f} m")
+
+            '''SAVE DATA TO JSON FILE'''
+
+            print("\nPlotting results...")
+            plt.figure(figsize=(9, 6))
+            pose_arr = np.array(self.pose_data)
+            des_pose_arr = np.array(self.des_pose_data)
+            plt.plot(des_pose_arr[:, 0], des_pose_arr[:, 1], 'g--', label='Desired Path')
+            plt.plot(pose_arr[:, 0], pose_arr[:, 1], 'r-', label='Robot Path')
+            plt.xlabel('X (m)')
+            plt.ylabel('Y (m)')
+            plt.title('Robot vs Desired Path')
+            plt.legend()
+            plt.grid(True)
+            plt.axis('equal')
+            plt.show()
+
 if __name__ == "__main__":
-    js = CreateClass()
+    js = CreateClass(id=86, map_id=87)
     print("Main script running. Press Ctrl+C to stop.")
 
     try:
@@ -574,3 +644,4 @@ if __name__ == "__main__":
         print("\nStopping...")
     finally:
         js.stop()
+        js.plot_results()

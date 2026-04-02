@@ -41,13 +41,15 @@ class CreateClass():
         self.rrt_end_time = None
         self.pose_data = []
         self.des_pose_data = []
+        self.wypt_error = []
+        self.yaw_error = []
 
         # Occupancy grid map variables
         self.occupancy_grid = None
         self.grid_size = None
         self.width = None; self.height = None
         self.map_x_min = None; self.map_x_max = None; self.map_y_min = None; self.map_y_max = None
-        self.robot_radius = 0.175 # m
+        self.robot_radius = 0.22 # m
 
         # Matplotlib figure/axes for plotting and close handler
         self.fig, self.ax = plt.subplots(figsize=(9, 6))
@@ -60,8 +62,6 @@ class CreateClass():
         self.Kp_speed = 1 # forward speed gain
         self.yaw_thresh = math.radians(5) # yaw error threshold for stopping in degrees
 
-        self.run_t = 10000000 # run time
-        
         # Toggle state variables
         self.arm_start_time = None
         self.mode_start_time = None
@@ -214,7 +214,7 @@ class CreateClass():
     def wrapToPi(self, angle):
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
-    def compute_rrt_path(self, goal, expand_dis=0.25, max_iter=5000):
+    def compute_rrt_path(self, goal, expand_dis=0.25, max_iter=10000):
         if goal is None:
             goal = [self.map_x, self.map_y] # update goal to latest position of robot in map frame
 
@@ -312,9 +312,12 @@ class CreateClass():
         # Don't move forward until facing right direction
         if abs(yaw_error) > self.yaw_thresh and dist2wp_prev < self.wp_rad:
             u_des = 0
+        else:
+            self.yaw_error.append(yaw_error)
 
         # Iterate waypoints after reaching waypoint radius
         if dist2wp < self.wp_rad:
+            self.wypt_error.append(dist2wp)
             self.wp_num += 1
         
         # Bound forward speed and turn rate
@@ -519,14 +522,7 @@ class CreateClass():
             return
 
         self.ax.cla()
-        self.ax.imshow(
-            self.occupancy_grid,
-            extent=[self.map_x_min, self.map_x_max, self.map_y_min, self.map_y_max],
-            origin='lower',
-            cmap='gray',
-            vmin=0.0,
-            vmax=1.0,
-        )
+        self.ax.imshow(self.occupancy_grid, extent=[self.map_x_min, self.map_x_max, self.map_y_min, self.map_y_max], origin='lower', cmap='gray', vmin=0.0, vmax=1.0)
 
         # Plot mocap origin.
         # self.ax.plot(0.0, 0.0, 'b*', markersize=10)
@@ -587,42 +583,36 @@ class CreateClass():
         # self.mowing_sound_thread.join()
         plt.close('all')
 
-    def plot_results(self):
+    def save_results(self):
+        # Save pose and desired pose data to CSV files for analysis
         if len(self.pose_data) > 0 and len(self.des_pose_data) > 0:
-            posistion_error = np.linalg.norm(pose_arr[:, :2] - des_pose_arr[:, :2], axis=1)
-            yaw_error = np.abs(self.wrapToPi(pose_arr[:, 2] - des_pose_arr[:, 2]))
-            travel_time = self.rrt_end_time - self.rrt_start_time if self.rrt_start_time and self.rrt_end_time else 0
-            distance_to_goal = self.des_path[-1] - np.array([self.x, self.y]) if self.des_path is not None else np.array([0, 0])
-            print(f"Average Position Error: {np.mean(posistion_error):.3f} m")
-            print(f"Average Yaw Error: {math.degrees(np.mean(yaw_error)):.2f} degrees")
-            print(f"Travel Time: {travel_time:.2f} s")
-            print(f"Distance to Goal: {np.linalg.norm(distance_to_goal):.3f} m")
+            np.savetxt("12_Weeks/pose_data.csv", self.pose_data, delimiter=",", header="x,y,yaw", comments="")
+            np.savetxt("12_Weeks/des_pose_data.csv", self.des_pose_data, delimiter=",", header="x_des,y_des,psi_des", comments="")
+            print("Pose data saved to pose_data.csv and des_pose_data.csv")
 
-            # Calculate closest distance between robot path and obstacles
-            x_obs = [u**self.grid_size + self.map_x_min for u in range(self.width) for v in range(self.height) if self.occupancy_grid[v, u] <= 0.0]
-            y_obs = [v**self.grid_size + self.map_y_min for u in range(self.width) for v in range(self.height) if self.occupancy_grid[v, u] <= 0.0]
-            obs_points = np.array(list(zip(x_obs, y_obs)))
-            distance_to_obstacles = np.min(np.linalg.norm(obs_points[:, np.newaxis] - self.pose_arr[:, :2], axis=2), axis=0)
-            print(f"Minimum Distance to Obstacles: {np.min(distance_to_obstacles):.3f} m")
+        # Save occupancy grid and paths for visualization
+        if self.occupancy_grid is not None:
+            np.save("12_Weeks/occupancy_grid.npy", self.occupancy_grid)
+            occupancy_grid_info = {
+                'grid_size': self.grid_size,
+                'width': self.width,
+                'height': self.height,
+                'map_x_min': self.map_x_min,
+                'map_x_max': self.map_x_max,
+                'map_y_min': self.map_y_min,
+                'map_y_max': self.map_y_max
+            }
+            np.save("12_Weeks/occupancy_grid_info.npy", occupancy_grid_info)
 
-            '''SAVE DATA TO JSON FILE'''
+            print("Occupancy grid and info saved to occupancy_grid.npy and occupancy_grid_info.npy")
 
-            print("\nPlotting results...")
-            plt.figure(figsize=(9, 6))
-            pose_arr = np.array(self.pose_data)
-            des_pose_arr = np.array(self.des_pose_data)
-            plt.plot(des_pose_arr[:, 0], des_pose_arr[:, 1], 'g--', label='Desired Path')
-            plt.plot(pose_arr[:, 0], pose_arr[:, 1], 'r-', label='Robot Path')
-            plt.xlabel('X (m)')
-            plt.ylabel('Y (m)')
-            plt.title('Robot vs Desired Path')
-            plt.legend()
-            plt.grid(True)
-            plt.axis('equal')
-            plt.show()
+        print(f"Path execution time: {self.rrt_end_time - self.rrt_start_time:.2f} seconds" if self.rrt_start_time and self.rrt_end_time else "RRT execution time not available") 
+        print(f"Final relative position between robots: {math.sqrt((self.x - self.map_x)**2 + (self.y - self.map_y)**2):.2f} m" if self.x and self.y and self.map_x and self.map_y else "Relative position not available")
+        print(f"Average waypoint error: {np.mean(self.wypt_error):.2f} m" if len(self.wypt_error) > 0 else "Waypoint error not available")
+        print(f"Average yaw error: {math.degrees(np.mean(self.yaw_error)):.2f} degrees" if len(self.yaw_error) > 0 else "Yaw error not available")
 
 if __name__ == "__main__":
-    js = CreateClass(id=86, map_id=87)
+    js = CreateClass(id=82, map_id=81)
     print("Main script running. Press Ctrl+C to stop.")
 
     try:
@@ -644,4 +634,4 @@ if __name__ == "__main__":
         print("\nStopping...")
     finally:
         js.stop()
-        js.plot_results()
+        js.save_results()

@@ -26,7 +26,7 @@ map_params_config = {
 }
 
 # Set Manual Goal
-GOAL_POINT = [-4.0, -4.0] 
+GOAL_POINT = [4.0, 4.0] 
 
 # Simulation control flag
 sim_running = True
@@ -40,6 +40,7 @@ def on_close(event):
 wp_index = 0
 wp_radius = 0.2
 active_path = None
+rrt_tree_nodes = []  # for visualization of RRT tree nodes
 
 if __name__ == '__main__':
     create.start()
@@ -92,12 +93,9 @@ if __name__ == '__main__':
                     occupancy_grid[y_idx, x_idx] = 1.0
 
         # Run RRT Planning periodically
-        # Logic: If we don't have a path, plan one. If we have one, just follow it. 
-        # You can add logic to re-plan if the path becomes blocked.
-        rrt_tree_nodes = []
         
         # Check if current path is blocked by new obstacles
-        if active_path is not None:
+        if active_path is not None and wp_index < len(active_path):
             # Create a temporary planner just for collision checking utils
             # (We use current pose as start, though strictly we only need map params)
             temp_planner = RRT(start=[0,0], goal=[0,0], map_grid=occupancy_grid, map_params=map_params_config)
@@ -124,6 +122,8 @@ if __name__ == '__main__':
         if active_path is None:
              # Stop while planning
             create.set_cmd_vel(0,0)
+
+            rrt_tree_nodes = []
             
             # Plan only if figure is open and enough time has passed to accumulate map data
             if plt.fignum_exists(fig.number) and (t - t_start > 1.0):
@@ -180,6 +180,7 @@ if __name__ == '__main__':
                 print("Goal Reached!")
                 u_cmd = 0.0
                 r_cmd = 0.0
+                sim_running = False  # Optionally stop simulation when goal is reached
                 # Optionally reset to find new goal or stop
                 # active_path = None 
         else:
@@ -216,6 +217,10 @@ if __name__ == '__main__':
                 # Highlight current target
                 if wp_index < len(active_path):
                     ax.plot(active_path[wp_index, 0], active_path[wp_index, 1], 'y.', markersize=10)
+            
+            # Plot RRT Tree
+            if len(rrt_tree_nodes) > 0:
+                ax.plot(rrt_tree_nodes[:, 0], rrt_tree_nodes[:, 1], 'c.', markersize=2, label='RRT Nodes')
 
             ax.set_xlim(-5, 5)
             ax.set_ylim(-5, 5)

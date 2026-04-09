@@ -254,8 +254,8 @@ class CreateClass():
         self.robot_thread.join()
 
 if __name__ == "__main__":
-    # js = CreateClass(turn_scale=0.2, id=86)  # Adjust turn_scale and id as needed
-    js = CreateClass(turn_scale=2, id=86)  # Adjust turn_scale and id as needed
+    js = CreateClass(turn_scale=0.2, id=81)  # Adjust turn_scale and id as needed
+    # js = CreateClass(turn_scale=2, id=81)  # Adjust turn_scale and id as needed
     print("Main script running. Press Ctrl+C to stop.")
 
     try:

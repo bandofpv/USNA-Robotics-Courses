@@ -54,18 +54,26 @@ class CreateClass():
         self.fov_width = None; self.fov_height = None
         self.fov_x_min = None; self.fov_x_max = None; self.fov_y_min = None; self.fov_y_max = None
         self.robot_radius = 0.22 # m
+        self.plot_window_size = 5.0 # m half-width for fixed-size plot window centered on robot
+        self.expand_dis = 0.60 # m default expansion distance for RRT tree
+        self.default_expand_dis = self.expand_dis # reset value after successful plan
+        self.min_expand_dis = 0.10 # m minimum expansion distance for adaptive replanning
+        self.expand_dis_decay = 0.75 # multiplicative decay when replanning fails
+        self.map_update_count = 0 # increments on each occupancy-grid update
+        self.last_replan_map_update = -1 # map update count used by the last replan attempt
+        self.escape_mode = False # true when executing a short path to exit occupied space
 
         # Matplotlib figure/axes for plotting and close handler
         self.fig, (self.ax_full, self.ax_fov) = plt.subplots(1, 2, figsize=(13, 6))
-        self.ax_full.set_box_aspect(1)
-        self.ax_fov.set_box_aspect(1)
+        self.ax_full.set_aspect('equal', adjustable='box', anchor='C')
+        self.ax_fov.set_aspect('equal', adjustable='box', anchor='C')
         self.fig.canvas.mpl_connect('close_event', self.on_plot_close)
 
         # Define Controller Gains and algorithm constants
         self.wp_num = 0 # waypoint index
-        self.wp_rad = 0.075 # waypoint radius
-        self.Kp_yaw = 1 # heading gain
-        self.Kp_speed = 1 # forward speed gain
+        self.wp_rad = 0.15 # waypoint radius
+        self.Kp_yaw = 0.5 # heading gain
+        self.Kp_speed = 0.5 # forward speed gain
         self.yaw_thresh = math.radians(5) # yaw error threshold for stopping in degrees
 
         # Toggle state variables
@@ -162,6 +170,7 @@ class CreateClass():
         # print(f"Pose Update: x={self.x:.2f}, y={self.y:.2f}, yaw={self.yaw:.2f} rad", end="\r", flush=True)
 
     def map_occupancy_callback(self, msg):
+        self.map_update_count += 1
         self.width = msg['info']['width']
         self.height = msg['info']['height']
         self.grid_size = msg['info']['resolution']
@@ -226,6 +235,45 @@ class CreateClass():
         y = y_idx * res + y_min
         return np.array([x, y])
 
+    def world_to_grid_idx(self, x, y, x_min, y_min, res):
+        x_idx = int(np.floor((x - x_min) / res))
+        y_idx = int(np.floor((y - y_min) / res))
+        return x_idx, y_idx
+
+    def get_nearest_free_start(self, start_world):
+        if self.occupancy_grid is None or self.grid_size is None:
+            return None, False
+
+        free_mask = self.occupancy_grid > 0.5
+        if not np.any(free_mask):
+            return None, False
+
+        sx, sy = start_world
+        sx_idx, sy_idx = self.world_to_grid_idx(sx, sy, self.map_x_min, self.map_y_min, self.grid_size)
+        in_bounds = (0 <= sx_idx < self.occupancy_grid.shape[1]) and (0 <= sy_idx < self.occupancy_grid.shape[0])
+
+        if in_bounds and free_mask[sy_idx, sx_idx]:
+            return np.array([sx, sy]), False
+
+        free_cells = np.argwhere(free_mask)  # [y_idx, x_idx]
+        query_idx = np.array([
+            (sy - self.map_y_min) / self.grid_size,
+            (sx - self.map_x_min) / self.grid_size
+        ])
+        deltas = free_cells - query_idx
+        nearest_idx = int(np.argmin(np.sum(deltas * deltas, axis=1)))
+        nearest_y_idx, nearest_x_idx = free_cells[nearest_idx]
+        safe_start_world = self.grid_idx_to_world(nearest_x_idx, nearest_y_idx, self.map_x_min, self.map_y_min, self.grid_size)
+        return safe_start_world, True
+
+    def is_pose_in_free_cell(self, x, y):
+        if self.occupancy_grid is None or self.grid_size is None:
+            return False
+        x_idx, y_idx = self.world_to_grid_idx(x, y, self.map_x_min, self.map_y_min, self.grid_size)
+        if x_idx < 0 or x_idx >= self.occupancy_grid.shape[1] or y_idx < 0 or y_idx >= self.occupancy_grid.shape[0]:
+            return False
+        return self.occupancy_grid[y_idx, x_idx] > 0.5
+
     def path_collision_free_in_full_map(self, path):
         if path is None or len(path) < 2 or self.occupancy_grid is None:
             return False
@@ -242,7 +290,7 @@ class CreateClass():
             goal=path[-1],
             map_grid=self.occupancy_grid,
             map_params=map_params_config,
-            expand_dis=0.25,
+            expand_dis=self.expand_dis,
             max_iter=1
         )
 
@@ -298,57 +346,94 @@ class CreateClass():
         best_idx = int(np.argmin(np.array(candidate_dist)))
         return candidate_world[best_idx].tolist()
 
-    def compute_rrt_path(self, goal, expand_dis=0.25, max_iter=10000):
+    def compute_rrt_path(self, goal,  max_iter=10000):
         if self.occupancy_grid is None or self.grid_size is None:
             print("Full occupancy grid not available yet.")
-            return
+            return False
 
         if goal is None:
             goal = self.select_frontier_goal()
             if goal is None:
                 print("No reachable frontier found in camera FOV map.")
-                return
+                return False
 
-        start_pos = [self.x, self.y] # start position is where robot is located when RRT is started
+        start_pos = np.array([self.x, self.y]) # start position is where robot is located when RRT is started
+        safe_start_pos, start_was_adjusted = self.get_nearest_free_start(start_pos)
+        if safe_start_pos is None:
+            print("No free cell available for a valid RRT start position.")
+            self.des_path = None
+            self.p_des = None
+            self.numWypts = 0
+            return False
+        if start_was_adjusted:
+            # Enter escape mode: only move out of occupied space first, then replan frontier.
+            self.escape_mode = True
+            self.des_path = np.array([start_pos, safe_start_pos])
+            self.p_des = self.des_path
+            self.numWypts = len(self.p_des)
+            self.wp_num = 0
+            self.rrt_tree_nodes = None
+            print(f"Start pose occupied/out of bounds. Escaping to nearest free cell at x={safe_start_pos[0]:.2f}, y={safe_start_pos[1]:.2f}.")
+            return True
+        self.escape_mode = False
+        start_pos = safe_start_pos.tolist()
+
         map_params_config = {
             'res': self.grid_size,
             'x_limit': [self.map_x_min, self.map_x_max],
             'y_limit': [self.map_y_min, self.map_y_max],
             'origin': [self.map_x_min, self.map_y_min]
         }
-        planner = RRT(start=start_pos, 
-                        goal=goal, 
-                        map_grid=self.occupancy_grid, 
-                        map_params=map_params_config, 
-                        expand_dis=expand_dis, 
-                        max_iter=max_iter) 
-        
-        # Run the RRT planning algorithm
+        # Record that this map update has consumed one replan attempt.
+        self.last_replan_map_update = self.map_update_count
+
+        # Run one attempt per map update to avoid blocking/replanning loops.
+        expand_try = max(self.expand_dis, self.min_expand_dis)
+        planner = RRT(start=start_pos,
+                      goal=goal,
+                      map_grid=self.occupancy_grid,
+                      map_params=map_params_config,
+                      expand_dis=expand_try,
+                      max_iter=max_iter)
+
         path_result = planner.plan()
         self.rrt_tree_nodes = np.array(planner.tree)
-        
-        # If a path is found, store it and negate the waypoints to match the robot's coordinate frame
-        if path_result is not None:
-            if not self.path_collision_free_in_full_map(path_result):
-                print("Planned path intersects an obstacle in full lidar map. Rejecting path.")
-                self.des_path = None
-                self.p_des = None
-                self.numWypts = 0
-                return
 
+        if path_result is not None and self.path_collision_free_in_full_map(path_result):
             self.des_path = np.array(path_result)
             self.p_des = self.des_path # match the robot's actual coordinate frame for navigation
             self.numWypts = len(self.p_des)
-            print(f"Path found with {self.numWypts} waypoints")
-        else: 
-            print("No path found.")
-            return 
-            # self.stop()  # Stop the robot and threads if no path is found
+            self.expand_dis = self.default_expand_dis
+            print(f"Path found with {self.numWypts} waypoints (expand_dis={expand_try:.2f})")
+            return True
+
+        # Planning failed for this map update; lower expand distance for the next attempt.
+        self.des_path = None
+        self.p_des = None
+        self.numWypts = 0
+        next_expand = max(self.min_expand_dis, expand_try * self.expand_dis_decay)
+        self.expand_dis = next_expand
+        print(f"No valid path at expand_dis={expand_try:.2f}. Next attempt will use {self.expand_dis:.2f}.")
+        return False
 
     def waypoint_navigation(self):
+        # If escaping occupied space, stop as soon as we are free and trigger fresh frontier planning.
+        if self.escape_mode and self.x is not None and self.y is not None and self.is_pose_in_free_cell(self.x, self.y):
+            self.control_movement(0.0, 0.0)
+            self.escape_mode = False
+            self.p_des = None
+            self.des_path = None
+            self.rrt_tree_nodes = None
+            self.numWypts = 0
+            self.wp_num = 0
+            self.last_replan_map_update = -1
+            print("Robot exited occupied region. Replanning frontier exploration.")
+
         # If no desired path is set, compute a new RRT path to the goal
         if self.p_des is None:
-            self.compute_rrt_path(goal=None) # use latest position as goal if none provided
+            # Replan only when fresh map data is available to avoid repetitive retries.
+            if self.last_replan_map_update != self.map_update_count:
+                self.compute_rrt_path(goal=None)
             if self.p_des is None:
                 self.control_movement(0.0, 0.0)
                 return
@@ -361,24 +446,29 @@ class CreateClass():
             self.des_path = None
             self.rrt_tree_nodes = None
             self.is_manual_mode = True
-            self.armed = False
+            # self.armed = False
             self.wp_num = 0 # reset waypoints for next time
             self.beep([660, 540, 440], [0.2, 0.2, 0.2])
             print("All waypoints reached.")
             return
 
-        # If the robot is bumped, stop movement and switch to manual mode
+        # If the robot is bumped, stop and immediately replan a new path.
         if self.is_bumped:
             u_des = 0; r_des = 0
+            self.control_movement(u_des, r_des)
             self.robot_path = []
             self.p_des = None
             self.des_path = None
             self.rrt_tree_nodes = None
-            self.is_manual_mode = True
-            self.armed = False
-            self.wp_num = 0 # reset waypoints for next time
-            self.beep([660, 540, 440], [0.2, 0.2, 0.2])
-            print("Bump detected! Stopping movement.")
+            self.wp_num = 0 # reset waypoints so next path starts from waypoint 0
+            self.is_bumped = False
+            # Force immediate replan after bump even if map hasn't changed yet.
+            self.last_replan_map_update = -1
+            self.compute_rrt_path(goal=None)
+            if self.p_des is None:
+                print("Bump detected. Replanning...")
+                return
+            print("Bump detected. New path planned.")
             return
 
         # Set Desired Position (waypoint location at time t)
@@ -423,7 +513,7 @@ class CreateClass():
         
         # Bound forward speed and turn rate
         u = max(0,min(u_des,0.306))
-        r = max(-1.0,min(r_des,1.0))
+        r = max(-0.25,min(r_des,0.25))
 
         # Set the servo and esc command signals must be integers
         self.control_movement(u, r)
@@ -622,10 +712,8 @@ class CreateClass():
         if self.occupancy_grid is None:
             return
 
-        self.ax_full.cla()
-        self.ax_fov.cla()
-        self.ax_full.set_box_aspect(1)
-        self.ax_fov.set_box_aspect(1)
+        self.ax_full.clear()
+        self.ax_fov.clear()
 
         self.ax_full.imshow(
             self.occupancy_grid,
@@ -673,19 +761,26 @@ class CreateClass():
             self.ax_full.plot(robot_path_array[:, 0], robot_path_array[:, 1], 'r-', linewidth=1)
             self.ax_fov.plot(robot_path_array[:, 0], robot_path_array[:, 1], 'r-', linewidth=1)
 
-        # Keep display size and axis limits static.
-        self.ax_full.set_xlim(self.map_x_min, self.map_x_max)
-        self.ax_full.set_ylim(self.map_y_min, self.map_y_max)
-        self.ax_full.set_aspect('equal', adjustable='box')
+        # Keep a fixed-size view window centered on the robot (same behavior as mapping.py).
+        if self.x is not None and self.y is not None:
+            self.ax_full.set_xlim(self.x - self.plot_window_size, self.x + self.plot_window_size)
+            self.ax_full.set_ylim(self.y - self.plot_window_size, self.y + self.plot_window_size)
+            self.ax_fov.set_xlim(self.x - self.plot_window_size, self.x + self.plot_window_size)
+            self.ax_fov.set_ylim(self.y - self.plot_window_size, self.y + self.plot_window_size)
+        else:
+            self.ax_full.set_xlim(self.map_x_min, self.map_x_max)
+            self.ax_full.set_ylim(self.map_y_min, self.map_y_max)
+            if self.fov_x_min is not None:
+                self.ax_fov.set_xlim(self.fov_x_min, self.fov_x_max)
+                self.ax_fov.set_ylim(self.fov_y_min, self.fov_y_max)
+
+        self.ax_full.set_aspect('equal', adjustable='box', anchor='C')
         self.ax_full.set_xlabel('X (m)')
         self.ax_full.set_ylabel('Y (m)')
         self.ax_full.set_title('Full Lidar Occupancy Grid')
         self.ax_full.grid()
 
-        if self.fov_x_min is not None:
-            self.ax_fov.set_xlim(self.fov_x_min, self.fov_x_max)
-            self.ax_fov.set_ylim(self.fov_y_min, self.fov_y_max)
-        self.ax_fov.set_aspect('equal', adjustable='box')
+        self.ax_fov.set_aspect('equal', adjustable='box', anchor='C')
         self.ax_fov.set_xlabel('X (m)')
         self.ax_fov.set_ylabel('Y (m)')
         self.ax_fov.set_title('Camera FOV Occupancy Grid')
@@ -730,13 +825,13 @@ class CreateClass():
 
             print("Occupancy grid and info saved to occupancy_grid.npy and occupancy_grid_info.npy")
 
-        print(f"Path execution time: {self.rrt_end_time - self.rrt_start_time:.2f} seconds" if self.rrt_start_time and self.rrt_end_time else "RRT execution time not available") 
-        print(f"Final relative position between robots: {math.sqrt((self.x - self.map_x)**2 + (self.y - self.map_y)**2):.2f} m" if self.x and self.y and self.map_x and self.map_y else "Relative position not available")
+        print(f"Path execution time: {self.rrt_end_time - self.rrt_start_time:.2f} seconds" if self.rrt_start_time is not None and self.rrt_end_time is not None else "RRT execution time not available") 
+        print(f"Final robot position: x={self.x:.2f} m, y={self.y:.2f} m" if self.x is not None and self.y is not None else "Final robot position not available")
         print(f"Average waypoint error: {np.mean(self.wypt_error):.2f} m" if len(self.wypt_error) > 0 else "Waypoint error not available")
         print(f"Average yaw error: {math.degrees(np.mean(self.yaw_error)):.2f} degrees" if len(self.yaw_error) > 0 else "Yaw error not available")
 
 if __name__ == "__main__":
-    js = CreateClass(id=81)
+    js = CreateClass(id=86)
     print("Main script running. Press Ctrl+C to stop.")
 
     try:
@@ -746,7 +841,7 @@ if __name__ == "__main__":
                 axes_str = [f"{val:5.2f}" for val in js.axes]
                 status_str = "ARMED" if js.armed else "DISARMED"
                 mode_str = "MANUAL" if js.is_manual_mode else "AUTO"
-                print(f"\r[{status_str} | {mode_str}] Axes: {axes_str} | Buttons: {js.buttons}", end="", flush=True)
+                # print(f"\r[{status_str} | {mode_str}] Axes: {axes_str} | Buttons: {js.buttons}", end="", flush=True)
             else:
                 print("\rWaiting for joystick connection...", end="", flush=True)
 

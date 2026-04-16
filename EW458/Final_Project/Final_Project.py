@@ -34,6 +34,7 @@ class CreateClass():
         self.des_path = None # path from planner in map frame
         self.p_des = None # path in robot frame
         self.rrt_tree_nodes = None # RRT tree nodes for visualization
+        self.attempted_goal = None # latest attempted RRT goal for debug plotting
         self.numWypts = 0 # number of waypoints in path
         
         # Initialize timing variables for performance analysis
@@ -53,15 +54,24 @@ class CreateClass():
         self.fov_grid_size = None
         self.fov_width = None; self.fov_height = None
         self.fov_x_min = None; self.fov_x_max = None; self.fov_y_min = None; self.fov_y_max = None
+        self.camera_range = 3.0 # m expected camera sensing range for frontier targeting
+        self.frontier_range_tolerance = 1.0 # m allowed deviation from camera range for preferred frontiers
+        self.frontier_wall_clearance = 0.30 # m minimum clearance from occupied/unknown cells for frontier candidates
         self.robot_radius = 0.22 # m
         self.plot_window_size = 5.0 # m half-width for fixed-size plot window centered on robot
         self.expand_dis = 0.60 # m default expansion distance for RRT tree
         self.default_expand_dis = self.expand_dis # reset value after successful plan
         self.min_expand_dis = 0.10 # m minimum expansion distance for adaptive replanning
         self.expand_dis_decay = 0.75 # multiplicative decay when replanning fails
+        self.rrt_iter_scale_cap = 4.0 # max multiplier for adaptive RRT iterations
         self.map_update_count = 0 # increments on each occupancy-grid update
         self.last_replan_map_update = -1 # map update count used by the last replan attempt
         self.escape_mode = False # true when executing a short path to exit occupied space
+        self.escape_min_distance = 0.40 # m preferred minimum distance from occupied start when escaping
+        self.initial_scan_done = False # run one full 360 spin before first exploration plan
+        self.initial_scan_prev_yaw = None
+        self.initial_scan_accum_yaw = 0.0
+        self.initial_scan_rate = 0.35 # rad/s in-place scan speed
 
         # Matplotlib figure/axes for plotting and close handler
         self.fig, (self.ax_full, self.ax_fov) = plt.subplots(1, 2, figsize=(13, 6))
@@ -72,7 +82,7 @@ class CreateClass():
         # Define Controller Gains and algorithm constants
         self.wp_num = 0 # waypoint index
         self.wp_rad = 0.15 # waypoint radius
-        self.Kp_yaw = 0.5 # heading gain
+        self.Kp_yaw = 0.75 # heading gain
         self.Kp_speed = 0.5 # forward speed gain
         self.yaw_thresh = math.radians(5) # yaw error threshold for stopping in degrees
 
@@ -261,8 +271,21 @@ class CreateClass():
             (sx - self.map_x_min) / self.grid_size
         ])
         deltas = free_cells - query_idx
-        nearest_idx = int(np.argmin(np.sum(deltas * deltas, axis=1)))
-        nearest_y_idx, nearest_x_idx = free_cells[nearest_idx]
+        d2 = np.sum(deltas * deltas, axis=1)
+
+        # Prefer escape targets with a minimum standoff distance from the occupied start.
+        min_escape_cells = self.escape_min_distance / self.grid_size
+        far_enough_mask = d2 >= (min_escape_cells ** 2)
+
+        if np.any(far_enough_mask):
+            candidate_indices = np.where(far_enough_mask)[0]
+            nearest_candidate_idx = candidate_indices[int(np.argmin(d2[candidate_indices]))]
+            nearest_y_idx, nearest_x_idx = free_cells[nearest_candidate_idx]
+        else:
+            # Fallback: if map is too constrained, use closest free cell.
+            nearest_idx = int(np.argmin(d2))
+            nearest_y_idx, nearest_x_idx = free_cells[nearest_idx]
+
         safe_start_world = self.grid_idx_to_world(nearest_x_idx, nearest_y_idx, self.map_x_min, self.map_y_min, self.grid_size)
         return safe_start_world, True
 
@@ -309,12 +332,35 @@ class CreateClass():
         if self.x is None or self.y is None:
             return None
 
+        # Snapshot map data to avoid shape races while ROS callbacks update grids.
+        fov_grid = np.array(self.fov_occupancy_grid, copy=True)
+        full_grid = np.array(self.occupancy_grid, copy=True)
+        fov_x_min = self.fov_x_min
+        fov_y_min = self.fov_y_min
+        fov_grid_size = self.fov_grid_size
+        map_x_min = self.map_x_min
+        map_y_min = self.map_y_min
+        grid_size = self.grid_size
+
+        # Build a wall-proximity mask in full map so we can reject frontiers hugging walls.
+        occupied_or_unknown = full_grid <= 0.5
+        clearance_cells = int(np.ceil(self.frontier_wall_clearance / grid_size))
+        if clearance_cells > 0:
+            near_wall_mask = ndimage.binary_dilation(occupied_or_unknown, iterations=clearance_cells)
+        else:
+            near_wall_mask = occupied_or_unknown
+
         eps = 1e-3
-        fov_unknown = np.isclose(self.fov_occupancy_grid, 0.5, atol=eps)
-        fov_free = self.fov_occupancy_grid > 0.5 + eps
+        fov_unknown = np.isclose(fov_grid, 0.5, atol=eps)
+        fov_free = fov_grid > 0.5 + eps
 
         # Frontier candidates are free cells adjacent to unknown cells.
         unknown_neighbors = ndimage.binary_dilation(fov_unknown, structure=np.ones((3, 3), dtype=bool))
+        if unknown_neighbors.shape != fov_free.shape:
+            min_rows = min(unknown_neighbors.shape[0], fov_free.shape[0])
+            min_cols = min(unknown_neighbors.shape[1], fov_free.shape[1])
+            unknown_neighbors = unknown_neighbors[:min_rows, :min_cols]
+            fov_free = fov_free[:min_rows, :min_cols]
         frontier_free = fov_free & unknown_neighbors
         frontier_idx = np.argwhere(frontier_free)
         if frontier_idx.size == 0:
@@ -325,16 +371,18 @@ class CreateClass():
         candidate_dist = []
 
         for y_idx, x_idx in frontier_idx:
-            p_world = self.grid_idx_to_world(x_idx, y_idx, self.fov_x_min, self.fov_y_min, self.fov_grid_size)
+            p_world = self.grid_idx_to_world(x_idx, y_idx, fov_x_min, fov_y_min, fov_grid_size)
 
             # Validate candidate on full map: in bounds and free.
-            full_x_idx = int((p_world[0] - self.map_x_min) / self.grid_size)
-            full_y_idx = int((p_world[1] - self.map_y_min) / self.grid_size)
-            if full_x_idx < 0 or full_x_idx >= self.occupancy_grid.shape[1]:
+            full_x_idx = int((p_world[0] - map_x_min) / grid_size)
+            full_y_idx = int((p_world[1] - map_y_min) / grid_size)
+            if full_x_idx < 0 or full_x_idx >= full_grid.shape[1]:
                 continue
-            if full_y_idx < 0 or full_y_idx >= self.occupancy_grid.shape[0]:
+            if full_y_idx < 0 or full_y_idx >= full_grid.shape[0]:
                 continue
-            if self.occupancy_grid[full_y_idx, full_x_idx] <= 0.5:
+            if full_grid[full_y_idx, full_x_idx] <= 0.5:
+                continue
+            if near_wall_mask[full_y_idx, full_x_idx]:
                 continue
 
             candidate_world.append(p_world)
@@ -343,7 +391,18 @@ class CreateClass():
         if not candidate_world:
             return None
 
-        best_idx = int(np.argmin(np.array(candidate_dist)))
+        candidate_dist = np.array(candidate_dist)
+
+        # Prefer frontiers near camera range to push exploration outward from the robot.
+        near_range_mask = np.abs(candidate_dist - self.camera_range) <= self.frontier_range_tolerance
+        if np.any(near_range_mask):
+            masked_indices = np.where(near_range_mask)[0]
+            best_local = int(np.argmin(np.abs(candidate_dist[masked_indices] - self.camera_range)))
+            best_idx = int(masked_indices[best_local])
+        else:
+            # Fallback: choose the frontier closest to the target camera range.
+            best_idx = int(np.argmin(np.abs(candidate_dist - self.camera_range)))
+
         return candidate_world[best_idx].tolist()
 
     def compute_rrt_path(self, goal,  max_iter=10000):
@@ -354,8 +413,11 @@ class CreateClass():
         if goal is None:
             goal = self.select_frontier_goal()
             if goal is None:
+                self.attempted_goal = None
                 print("No reachable frontier found in camera FOV map.")
                 return False
+
+        self.attempted_goal = np.array(goal)
 
         start_pos = np.array([self.x, self.y]) # start position is where robot is located when RRT is started
         safe_start_pos, start_was_adjusted = self.get_nearest_free_start(start_pos)
@@ -389,12 +451,18 @@ class CreateClass():
 
         # Run one attempt per map update to avoid blocking/replanning loops.
         expand_try = max(self.expand_dis, self.min_expand_dis)
+
+        # Use more iterations for smaller expansion distances.
+        iter_scale = self.default_expand_dis / max(expand_try, 1e-6)
+        iter_scale = min(max(iter_scale, 1.0), self.rrt_iter_scale_cap)
+        iter_try = int(max_iter * iter_scale)
+
         planner = RRT(start=start_pos,
                       goal=goal,
                       map_grid=self.occupancy_grid,
                       map_params=map_params_config,
                       expand_dis=expand_try,
-                      max_iter=max_iter)
+                  max_iter=iter_try)
 
         path_result = planner.plan()
         self.rrt_tree_nodes = np.array(planner.tree)
@@ -404,7 +472,7 @@ class CreateClass():
             self.p_des = self.des_path # match the robot's actual coordinate frame for navigation
             self.numWypts = len(self.p_des)
             self.expand_dis = self.default_expand_dis
-            print(f"Path found with {self.numWypts} waypoints (expand_dis={expand_try:.2f})")
+            print(f"Path found with {self.numWypts} waypoints (expand_dis={expand_try:.2f}, max_iter={iter_try})")
             return True
 
         # Planning failed for this map update; lower expand distance for the next attempt.
@@ -413,10 +481,40 @@ class CreateClass():
         self.numWypts = 0
         next_expand = max(self.min_expand_dis, expand_try * self.expand_dis_decay)
         self.expand_dis = next_expand
-        print(f"No valid path at expand_dis={expand_try:.2f}. Next attempt will use {self.expand_dis:.2f}.")
+        print(f"No valid path at expand_dis={expand_try:.2f}, max_iter={iter_try}. Next attempt will use expand_dis={self.expand_dis:.2f}.")
+        return False
+
+    def run_initial_exploration_scan(self):
+        if self.yaw is None:
+            self.control_movement(0.0, 0.0)
+            return False
+
+        if self.initial_scan_prev_yaw is None:
+            self.initial_scan_prev_yaw = self.yaw
+            self.initial_scan_accum_yaw = 0.0
+
+        delta_yaw = self.wrapToPi(self.yaw - self.initial_scan_prev_yaw)
+        self.initial_scan_accum_yaw += abs(delta_yaw)
+        self.initial_scan_prev_yaw = self.yaw
+
+        if self.initial_scan_accum_yaw >= (2.0 * math.pi):
+            self.control_movement(0.0, 0.0)
+            self.initial_scan_done = True
+            self.initial_scan_prev_yaw = None
+            self.initial_scan_accum_yaw = 0.0
+            self.last_replan_map_update = -1
+            print("Initial 360 scan complete. Starting frontier exploration.")
+            return True
+
+        self.control_movement(0.0, self.initial_scan_rate)
         return False
 
     def waypoint_navigation(self):
+        # Perform one-time 360 scan before first exploration planning.
+        if not self.initial_scan_done:
+            self.run_initial_exploration_scan()
+            return
+
         # If escaping occupied space, stop as soon as we are free and trigger fresh frontier planning.
         if self.escape_mode and self.x is not None and self.y is not None and self.is_pose_in_free_cell(self.x, self.y):
             self.control_movement(0.0, 0.0)
@@ -438,18 +536,18 @@ class CreateClass():
                 self.control_movement(0.0, 0.0)
                 return
 
-        # Switch to manual mode if all waypoints reached or if bumped
+        # If all waypoints are reached, start a new frontier exploration cycle.
         if self.wp_num >= self.numWypts:
             u_des = 0; r_des = 0
+            self.control_movement(u_des, r_des)
             self.robot_path = []
             self.p_des = None
             self.des_path = None
             self.rrt_tree_nodes = None
-            self.is_manual_mode = True
-            # self.armed = False
             self.wp_num = 0 # reset waypoints for next time
-            self.beep([660, 540, 440], [0.2, 0.2, 0.2])
-            print("All waypoints reached.")
+            # Force the next loop to request a fresh frontier plan.
+            self.last_replan_map_update = -1
+            print("All waypoints reached. Replanning new frontier exploration.")
             return
 
         # If the robot is bumped, stop and immediately replan a new path.
@@ -744,6 +842,11 @@ class CreateClass():
         if self.rrt_tree_nodes is not None and len(self.rrt_tree_nodes) > 0:
             self.ax_full.plot(self.rrt_tree_nodes[:, 0], self.rrt_tree_nodes[:, 1], 'c.', markersize=2)
             self.ax_fov.plot(self.rrt_tree_nodes[:, 0], self.rrt_tree_nodes[:, 1], 'c.', markersize=2)
+
+        # Plot the latest attempted RRT goal for debugging.
+        if self.attempted_goal is not None and len(self.attempted_goal) == 2:
+            self.ax_full.plot(self.attempted_goal[0], self.attempted_goal[1], 'mx', markersize=10, markeredgewidth=2)
+            self.ax_fov.plot(self.attempted_goal[0], self.attempted_goal[1], 'mx', markersize=10, markeredgewidth=2)
 
         if self.des_path is not None and len(self.des_path) > 0:
             goal_point = self.des_path[-1]

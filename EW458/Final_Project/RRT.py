@@ -60,8 +60,8 @@ class RRT:
         if x_idx < 0 or x_idx >= self.map.shape[1] or y_idx < 0 or y_idx >= self.map.shape[0]:
             return False
         
-        # Check if grid cell is occupied or unexplored (assuming 1.0 is free, 0.5 is unexplored, and 0.0 is occupied) 
-        if self.map[y_idx, x_idx] <= 0.5:
+        # Check if the cell is occupied (1.0 means free, 0.5 mean unknown, 0.0 means occupied)
+        if self.map[y_idx, x_idx] != 1.0:
             return False
         
         return True

@@ -1,5 +1,26 @@
 # Robot Dog Final Project
 
+## Project Overview
+
+This project implements and evaluates autonomous navigation for a Unitree Go2 robot in Isaac Lab.
+The goal is to move through a tactical environment while balancing mobility and line-of-sight (LoS)
+exposure constraints.
+
+The codebase includes:
+
+- A custom reinforcement learning environment in `exts/tactical_nav/` that defines task setup,
+  observations, raycasting/visibility utilities, and reward shaping.
+- Training and inference scripts in `scripts/` to train a PPO-based policy and run policy rollouts.
+- A traditional (non-RL) baseline navigation controller for comparison against learned behavior.
+- Logging and evaluation utilities to save rollout metrics and compare baseline vs RL performance.
+
+Typical workflow:
+
+1. Train a locomotion/walking policy in Isaac Lab (or use a provided policy).
+2. Train the custom tactical navigation RL policy using this repository's environment.
+3. Run evaluations for both RL and baseline controllers.
+4. Compare metrics such as `los_exposed` and `los_blocked` from generated CSV logs.
+
 ## Requirements
 
 ### Isaac Lab Workstation Setup

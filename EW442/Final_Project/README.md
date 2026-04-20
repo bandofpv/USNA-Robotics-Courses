@@ -39,6 +39,12 @@ Create the conda environment:
 conda env create -f environment.yml
 ```
 
+Activate the conda environment:
+
+```bash
+conda activate env_isaaclab
+```
+
 ## Train Walking Policy (Isaac Lab)
 
 In the Isaac Lab repository, run:

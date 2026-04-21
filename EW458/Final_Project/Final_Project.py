@@ -6,6 +6,7 @@ import roslibpy
 import numpy as np
 from RRT import RRT
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 from matplotlib.path import Path
 from PIL import Image
 from scipy import ndimage
@@ -22,12 +23,19 @@ class CreateClass():
         # Vehicle state variables
         self.armed = False
         self.is_manual_mode = True
+        self.escape_mode = False 
         self.is_docked = None
         self.hazard_detected = False
         self.dock_id = None
         self.undock_id = None
         self.dock_result = None
         self.is_bumped = False
+        
+        # Exploration state variables
+        self.initial_scan_done = False 
+        self.initial_scan_prev_yaw = None
+        self.initial_scan_accum_yaw = 0.0
+        self.initial_scan_rate = 0.35 # rad/s in-place scan speed
 
         # Initialize empty arrays to be filled with data for plotting
         self.robot_path = [] # path of robot
@@ -54,24 +62,31 @@ class CreateClass():
         self.fov_grid_size = None
         self.fov_width = None; self.fov_height = None
         self.fov_x_min = None; self.fov_x_max = None; self.fov_y_min = None; self.fov_y_max = None
-        self.camera_range = 3.0 # m expected camera sensing range for frontier targeting
-        self.frontier_range_tolerance = 1.0 # m allowed deviation from camera range for preferred frontiers
-        self.frontier_wall_clearance = 0.30 # m minimum clearance from occupied/unknown cells for frontier candidates
+        self.camera_range = 3.0 # m 
+        self.frontier_range_tolerance = 1.0 # m
+        self.frontier_wall_clearance = 0.30 # m
         self.robot_radius = 0.22 # m
         self.plot_window_size = 5.0 # m half-width for fixed-size plot window centered on robot
-        self.expand_dis = 0.60 # m default expansion distance for RRT tree
-        self.default_expand_dis = self.expand_dis # reset value after successful plan
-        self.min_expand_dis = 0.10 # m minimum expansion distance for adaptive replanning
+        self.expand_dis = 0.60 # m 
+        self.default_expand_dis = self.expand_dis # used as a reference for scaling adaptive expand_dis during replanning 
+        self.min_expand_dis = 0.10 # m 
         self.expand_dis_decay = 0.75 # multiplicative decay when replanning fails
         self.rrt_iter_scale_cap = 4.0 # max multiplier for adaptive RRT iterations
-        self.map_update_count = 0 # increments on each occupancy-grid update
+        self.map_update_count = 0 
         self.last_replan_map_update = -1 # map update count used by the last replan attempt
-        self.escape_mode = False # true when executing a short path to exit occupied space
         self.escape_min_distance = 0.40 # m preferred minimum distance from occupied start when escaping
-        self.initial_scan_done = False # run one full 360 spin before first exploration plan
-        self.initial_scan_prev_yaw = None
-        self.initial_scan_accum_yaw = 0.0
-        self.initial_scan_rate = 0.35 # rad/s in-place scan speed
+
+        # Cone detection fusion parameters/state
+        self.cone_diameter = 0.10 # m
+        self.cone_radius = self.cone_diameter / 2.0
+        self.cone_merge_distance = 1.0 # m distance for associating repeated detections to the same cone
+        self.min_cone_score = 0.60 # minimum detector confidence to consider a cone detection valid
+        self.cone_confirmations_required = 5 # minimum repeated detections before a cone is treated as occupied
+        self.cone_stale_time = 1.0 # s timeout for unconfirmed cone tracks to reject transient artifacts
+        self.camera_fov_deg = 66.0 # degrees camera field of view (same as in mapping.py)
+        self.camera_fov_half_rad = math.radians(self.camera_fov_deg / 2.0)
+        self.detected_cones = [] # [{'x': float, 'y': float, 'id': int, 'last_seen': float}]
+        self.cone_lock = threading.Lock()
 
         # Matplotlib figure/axes for plotting and close handler
         self.fig, (self.ax_full, self.ax_fov) = plt.subplots(1, 2, figsize=(13, 6))
@@ -118,11 +133,13 @@ class CreateClass():
         self.odom_sub = roslibpy.Topic(self.client, f'/create_{self.id}/odom', 'nav_msgs/Odometry')
         self.map_og_sub = roslibpy.Topic(self.client, f'/create_{self.id}/occupancy_grid', 'nav_msgs/OccupancyGrid')
         self.map_og_fov_sub = roslibpy.Topic(self.client, f'/create_{self.id}/occupancy_grid_fov', 'nav_msgs/OccupancyGrid')
+        self.detect_sub = roslibpy.Topic(self.client, f'/create_{self.id}/detections', 'vision_msgs/Detection2DArray')
         self.dock_sub.subscribe(self.dock_callback)
         self.hazard_sub.subscribe(self.hazard_callback)
         self.odom_sub.subscribe(self.odom_callback)
         self.map_og_sub.subscribe(self.map_occupancy_callback)
         self.map_og_fov_sub.subscribe(self.map_fov_occupancy_callback)
+        self.detect_sub.subscribe(self.detect_callback)
 
         # Safety Override Service
         saftey_service = roslibpy.Service(self.client, f'/create_{self.id}/motion_control/set_parameters', 'rcl_interfaces/srv/SetParameters')
@@ -193,11 +210,93 @@ class CreateClass():
         grid_data = np.array(msg['data']).reshape((self.height, self.width))
         self.occupancy_grid = 1.0 - (grid_data / 100.0)
 
+        self._prune_detected_cones()
+
+        # Fuse camera cone detections into the map as occupied disks.
+        self._overlay_detected_cones_on_occupancy_grid(self.occupancy_grid)
+
         # Inflate obstacles in occupancy grid by robot radius to account for robot size in planning
         if self.robot_radius > 0:
             inflation_radius = int(np.ceil(self.robot_radius / self.grid_size))
             inflated_obstacles = ndimage.binary_dilation(self.occupancy_grid <= 0.0, iterations=inflation_radius)
             self.occupancy_grid[inflated_obstacles] = 0.0
+
+    def _overlay_detected_cones_on_occupancy_grid(self, grid):
+        if grid is None or self.grid_size is None or self.map_x_min is None or self.map_y_min is None:
+            return
+
+        with self.cone_lock:
+            cones_snapshot = [dict(cone) for cone in self.detected_cones]
+
+        if not cones_snapshot:
+            return
+
+        radius_cells = max(1, int(np.ceil(self.cone_radius / self.grid_size)))
+
+        for cone in cones_snapshot:
+            if cone.get('hits', 0) < self.cone_confirmations_required:
+                continue
+
+            cx_idx, cy_idx = self.world_to_grid_idx(cone['x'], cone['y'], self.map_x_min, self.map_y_min, self.grid_size)
+            if cx_idx < 0 or cy_idx < 0 or cx_idx >= grid.shape[1] or cy_idx >= grid.shape[0]:
+                continue
+
+            # Determine bounding box 
+            x0 = max(0, cx_idx - radius_cells)
+            x1 = min(grid.shape[1] - 1, cx_idx + radius_cells)
+            y0 = max(0, cy_idx - radius_cells)
+            y1 = min(grid.shape[0] - 1, cy_idx + radius_cells)
+
+            # Create a circular mask 
+            yy, xx = np.ogrid[y0:y1 + 1, x0:x1 + 1]
+            mask = (xx - cx_idx) ** 2 + (yy - cy_idx) ** 2 <= radius_cells ** 2
+            roi = grid[y0:y1 + 1, x0:x1 + 1]
+            roi[mask] = 0.0
+
+    def _prune_detected_cones(self):
+        now = time.time()
+        with self.cone_lock:
+            filtered = []
+            for cone in self.detected_cones:
+                age = now - cone.get('last_seen', now)
+                is_confirmed = cone.get('hits', 0) >= self.cone_confirmations_required
+
+                # If cone should currently be visible but hasn't been re-detected, it's likely a false positive or moved.
+                if is_confirmed and age > self.cone_stale_time and self._is_cone_in_camera_view(cone['x'], cone['y']):
+                    continue
+
+                # Remove unconfirmed stale tracks to suppress transient artifacts.
+                if not is_confirmed and age > self.cone_stale_time:
+                    continue
+
+                filtered.append(cone)
+
+            self.detected_cones = filtered
+
+    def _is_cone_in_camera_view(self, cone_x, cone_y):
+        if self.x is None or self.y is None or self.yaw is None:
+            return False
+
+        # Vector from robot to cone in world frame
+        dx = cone_x - self.x
+        dy = cone_y - self.y
+        range_to_cone = math.hypot(dx, dy)
+
+        # Check within camera range 
+        if range_to_cone > self.camera_range or range_to_cone < 0.1:
+            return False
+
+        # Calculate angle of cone relative to robot heading in world frame
+        cone_angle_world = math.atan2(dy, dx)
+        
+        # Convert to robot frame (relative angle from robot heading)
+        angle_relative = cone_angle_world - self.yaw
+        
+        # Wrap angle to [-pi, pi]
+        angle_relative = self.wrapToPi(angle_relative)
+        
+        # Check if within camera FOV 
+        return abs(angle_relative) <= self.camera_fov_half_rad
 
     def map_fov_occupancy_callback(self, msg):
         self.fov_width = msg['info']['width']
@@ -210,6 +309,80 @@ class CreateClass():
 
         grid_data = np.array(msg['data']).reshape((self.fov_height, self.fov_width))
         self.fov_occupancy_grid = 1.0 - (grid_data / 100.0)
+
+    def detect_callback(self, msg):
+        if self.x is None or self.y is None or self.yaw is None:
+            return
+        detections = msg['detections'] 
+        for detect in detections: 
+            details = detect['results'] 
+            for detail in details: 
+                try:
+                    score = float(detail['hypothesis']['score'])
+                except (TypeError, ValueError):
+                    continue
+                if score < self.min_cone_score:
+                    continue
+
+                x_cam = detail['pose']['pose']['position']['x'] # points along negative b_2 axis
+                y_cam = detail['pose']['pose']['position']['y'] # points down
+                z_cam = detail['pose']['pose']['position']['z'] # points along b_1 axis
+                range_cam = math.hypot(z_cam, x_cam)
+                if z_cam <= 0:
+                    continue
+                if range_cam > self.camera_range:
+                    continue
+
+                itemID = detail['hypothesis']['class_id']
+                try:
+                    itemID = int(itemID)
+                except (TypeError, ValueError):
+                    continue
+                if itemID not in (0, 1):
+                    continue
+
+                # calculate global position given camera frame relative position
+                # NOTE: This assumes all units are in meters, check to ensure detector outputs in meters!!
+                item_x = self.x + z_cam*np.cos(self.yaw)+x_cam*np.sin(self.yaw)
+                item_y = self.y + z_cam*np.sin(self.yaw)-x_cam*np.cos(self.yaw)
+                # neglect vertical component since this is a 2D exercise
+                # print(f"Global position of detected item: ({item_x},{item_y})")
+                # print(f"Position of vehicle: ({self.x},{self.y})")
+
+                if not self._is_cone_in_camera_view(item_x, item_y):
+                    continue
+
+                # Associate this detection with existing cones based on proximity and ID, or create a new cone track if no match.
+                now = time.time()
+                with self.cone_lock:
+                    nearest_idx = None
+                    nearest_d2 = None
+                    for idx, cone in enumerate(self.detected_cones):
+                        if cone.get('id') != itemID:
+                            continue
+                        dx = cone['x'] - item_x
+                        dy = cone['y'] - item_y
+                        d2 = dx * dx + dy * dy
+                        if nearest_d2 is None or d2 < nearest_d2:
+                            nearest_d2 = d2
+                            nearest_idx = idx
+
+                    if nearest_idx is not None and nearest_d2 <= self.cone_merge_distance ** 2:
+                        self.detected_cones[nearest_idx]['x'] = item_x
+                        self.detected_cones[nearest_idx]['y'] = item_y
+                        self.detected_cones[nearest_idx]['id'] = itemID
+                        self.detected_cones[nearest_idx]['last_seen'] = now
+                        self.detected_cones[nearest_idx]['hits'] = self.detected_cones[nearest_idx].get('hits', 1) + 1
+                    else:
+                        self.detected_cones.append({
+                            'x': item_x,
+                            'y': item_y,
+                            'id': itemID,
+                            'last_seen': now,
+                            'hits': 1
+                        })
+
+        self._prune_detected_cones()
 
     def on_result(self, result):
         self.dock_result = result
@@ -262,6 +435,7 @@ class CreateClass():
         sx_idx, sy_idx = self.world_to_grid_idx(sx, sy, self.map_x_min, self.map_y_min, self.grid_size)
         in_bounds = (0 <= sx_idx < self.occupancy_grid.shape[1]) and (0 <= sy_idx < self.occupancy_grid.shape[0])
 
+        # If the start is in bounds and free, return it directly without escape mode.
         if in_bounds and free_mask[sy_idx, sx_idx]:
             return np.array([sx, sy]), False
 
@@ -344,19 +518,19 @@ class CreateClass():
 
         # Build a wall-proximity mask in full map so we can reject frontiers hugging walls.
         occupied_or_unknown = full_grid <= 0.5
-        clearance_cells = int(np.ceil(self.frontier_wall_clearance / grid_size))
+        clearance_cells = int(np.ceil(self.frontier_wall_clearance / grid_size)) # number of cells to clear based on desired wall clearance
         if clearance_cells > 0:
             near_wall_mask = ndimage.binary_dilation(occupied_or_unknown, iterations=clearance_cells)
         else:
             near_wall_mask = occupied_or_unknown
 
-        eps = 1e-3
+        eps = 1e-3 # tolerance for floating point comparisons
         fov_unknown = np.isclose(fov_grid, 0.5, atol=eps)
         fov_free = fov_grid > 0.5 + eps
 
         # Frontier candidates are free cells adjacent to unknown cells.
-        unknown_neighbors = ndimage.binary_dilation(fov_unknown, structure=np.ones((3, 3), dtype=bool))
-        if unknown_neighbors.shape != fov_free.shape:
+        unknown_neighbors = ndimage.binary_dilation(fov_unknown, structure=np.ones((3, 3), dtype=bool)) # dilate unknown cells to find their neighbors
+        if unknown_neighbors.shape != fov_free.shape: # safety check to avoid shape mismatch due to async map updates; trim to min shape if needed
             min_rows = min(unknown_neighbors.shape[0], fov_free.shape[0])
             min_cols = min(unknown_neighbors.shape[1], fov_free.shape[1])
             unknown_neighbors = unknown_neighbors[:min_rows, :min_cols]
@@ -370,6 +544,7 @@ class CreateClass():
         candidate_world = []
         candidate_dist = []
 
+        # Convert frontier grid indices to world coordinates and filter candidates based on full map
         for y_idx, x_idx in frontier_idx:
             p_world = self.grid_idx_to_world(x_idx, y_idx, fov_x_min, fov_y_min, fov_grid_size)
 
@@ -493,10 +668,12 @@ class CreateClass():
             self.initial_scan_prev_yaw = self.yaw
             self.initial_scan_accum_yaw = 0.0
 
+        # Accumulate absolute yaw change to track progress of the 360 scan, accounting for wraparound
         delta_yaw = self.wrapToPi(self.yaw - self.initial_scan_prev_yaw)
         self.initial_scan_accum_yaw += abs(delta_yaw)
         self.initial_scan_prev_yaw = self.yaw
 
+        # Check if we've completed a full 360 rotation (2*pi radians) and stop if so
         if self.initial_scan_accum_yaw >= (2.0 * math.pi):
             self.control_movement(0.0, 0.0)
             self.initial_scan_done = True
@@ -838,16 +1015,29 @@ class CreateClass():
                 ax.plot(self.x, self.y, 'ro', markersize=5)
                 ax.arrow(self.x, self.y, 0.5 * math.cos(self.yaw), 0.5 * math.sin(self.yaw), head_width=0.1, head_length=0.1, fc='r', ec='r')
 
+        with self.cone_lock:
+            cones_snapshot = [dict(cone) for cone in self.detected_cones]
+
+        for cone in cones_snapshot:
+            if cone.get('hits', 0) < self.cone_confirmations_required:
+                continue
+
+            cone_color = 'lime' if cone['id'] == 0 else 'orange'
+            self.ax_full.add_patch(Circle((cone['x'], cone['y']), self.cone_radius, edgecolor=cone_color, facecolor=cone_color, linewidth=2.0))
+            if self._is_cone_in_camera_view(cone['x'], cone['y']):
+                self.ax_fov.add_patch(Circle((cone['x'], cone['y']), self.cone_radius, edgecolor=cone_color, facecolor=cone_color, linewidth=2.0))
+
         # Plot RRT tree nodes and path on both plots for direct comparison.
         if self.rrt_tree_nodes is not None and len(self.rrt_tree_nodes) > 0:
             self.ax_full.plot(self.rrt_tree_nodes[:, 0], self.rrt_tree_nodes[:, 1], 'c.', markersize=2)
             self.ax_fov.plot(self.rrt_tree_nodes[:, 0], self.rrt_tree_nodes[:, 1], 'c.', markersize=2)
 
-        # Plot the latest attempted RRT goal for debugging.
+        # Plot the latest attempted RRT goal
         if self.attempted_goal is not None and len(self.attempted_goal) == 2:
             self.ax_full.plot(self.attempted_goal[0], self.attempted_goal[1], 'mx', markersize=10, markeredgewidth=2)
             self.ax_fov.plot(self.attempted_goal[0], self.attempted_goal[1], 'mx', markersize=10, markeredgewidth=2)
 
+        # Plot desired path and current waypoint
         if self.des_path is not None and len(self.des_path) > 0:
             goal_point = self.des_path[-1]
             self.ax_full.plot(goal_point[0], goal_point[1], 'g*', markersize=15)
@@ -908,13 +1098,13 @@ class CreateClass():
     def save_results(self):
         # Save pose and desired pose data to CSV files for analysis
         if len(self.pose_data) > 0 and len(self.des_pose_data) > 0:
-            np.savetxt("12_Weeks/pose_data.csv", self.pose_data, delimiter=",", header="x,y,yaw", comments="")
-            np.savetxt("12_Weeks/des_pose_data.csv", self.des_pose_data, delimiter=",", header="x_des,y_des,psi_des", comments="")
+            np.savetxt("Final_Project/pose_data.csv", self.pose_data, delimiter=",", header="x,y,yaw", comments="")
+            np.savetxt("Final_Project/des_pose_data.csv", self.des_pose_data, delimiter=",", header="x_des,y_des,psi_des", comments="")
             print("Pose data saved to pose_data.csv and des_pose_data.csv")
 
         # Save occupancy grid and paths for visualization
         if self.occupancy_grid is not None:
-            np.save("12_Weeks/occupancy_grid.npy", self.occupancy_grid)
+            np.save("Final_Project/occupancy_grid.npy", self.occupancy_grid)
             occupancy_grid_info = {
                 'grid_size': self.grid_size,
                 'width': self.width,
@@ -924,7 +1114,7 @@ class CreateClass():
                 'map_y_min': self.map_y_min,
                 'map_y_max': self.map_y_max
             }
-            np.save("12_Weeks/occupancy_grid_info.npy", occupancy_grid_info)
+            np.save("Final_Project/occupancy_grid_info.npy", occupancy_grid_info)
 
             print("Occupancy grid and info saved to occupancy_grid.npy and occupancy_grid_info.npy")
 
@@ -932,6 +1122,7 @@ class CreateClass():
         print(f"Final robot position: x={self.x:.2f} m, y={self.y:.2f} m" if self.x is not None and self.y is not None else "Final robot position not available")
         print(f"Average waypoint error: {np.mean(self.wypt_error):.2f} m" if len(self.wypt_error) > 0 else "Waypoint error not available")
         print(f"Average yaw error: {math.degrees(np.mean(self.yaw_error)):.2f} degrees" if len(self.yaw_error) > 0 else "Yaw error not available")
+        print(f"Detected cones: {self.detected_cones}")
 
 if __name__ == "__main__":
     js = CreateClass(id=86)

@@ -44,6 +44,8 @@ class CreateClass():
         self.rrt_tree_nodes = None # RRT tree nodes for visualization
         self.attempted_goal = None # latest attempted RRT goal for debug plotting
         self.numWypts = 0 # number of waypoints in path
+        self.home_pose = None # starting location used as the return-home target
+        self.return_home_mode = False
         
         # Initialize timing variables for performance analysis
         self.rrt_start_time = None
@@ -65,6 +67,7 @@ class CreateClass():
         self.camera_range = 3.0 # m 
         self.frontier_range_tolerance = 1.0 # m
         self.frontier_wall_clearance = 0.30 # m
+        self.frontier_min_free_area = 0.5 # m^2 minimum connected free space required for a frontier candidate
         self.robot_radius = 0.22 # m
         self.plot_window_size = 5.0 # m half-width for fixed-size plot window centered on robot
         self.expand_dis = 0.60 # m 
@@ -75,6 +78,14 @@ class CreateClass():
         self.map_update_count = 0 
         self.last_replan_map_update = -1 # map update count used by the last replan attempt
         self.escape_min_distance = 0.40 # m preferred minimum distance from occupied start when escaping
+
+        # Runtime rates
+        self.control_hz = 10.0
+        self.control_period = 1.0 / self.control_hz
+        self.map_update_hz = 2.0
+        self.map_update_period = 1.0 / self.map_update_hz
+        self.last_full_map_update_time = 0.0
+        self.last_fov_map_update_time = 0.0
 
         # Cone detection fusion parameters/state
         self.cone_diameter = 0.10 # m
@@ -97,7 +108,7 @@ class CreateClass():
         # Define Controller Gains and algorithm constants
         self.wp_num = 0 # waypoint index
         self.wp_rad = 0.15 # waypoint radius
-        self.Kp_yaw = 0.75 # heading gain
+        self.Kp_yaw = 2.0 # heading gain
         self.Kp_speed = 0.5 # forward speed gain
         self.yaw_thresh = math.radians(5) # yaw error threshold for stopping in degrees
 
@@ -126,6 +137,7 @@ class CreateClass():
         self.cmd_vel_pub = roslibpy.Topic(self.client, f'/create_{self.id}/cmd_vel', 'geometry_msgs/Twist')
         self.led_pub = roslibpy.Topic(self.client, f'/create_{self.id}/cmd_lightring', 'irobot_create_msgs/LightringLeds')
         self.beep_pub = roslibpy.Topic(self.client, f'/create_{self.id}/cmd_audio', 'irobot_create_msgs/AudioNoteVector')
+        self.cones_pub = roslibpy.Topic(self.client, f'/create_{self.id}/cones', 'geometry_msgs/PoseArray')
 
         # ROS Subscribers
         self.hazard_sub = roslibpy.Topic(self.client, f'/create_{self.id}/hazard_detection', 'irobot_create_msgs/HazardDetectionVector')
@@ -172,6 +184,7 @@ class CreateClass():
         print("Waiting for first pose message...")
         while self.x is None or self.y is None:
             time.sleep(0.01)  # Wait for the first pose message to be received
+        self.home_pose = np.array([self.x, self.y])
         print("Pose received. Starting main loop.")
 
     def hazard_callback(self, msg):
@@ -197,6 +210,11 @@ class CreateClass():
         # print(f"Pose Update: x={self.x:.2f}, y={self.y:.2f}, yaw={self.yaw:.2f} rad", end="\r", flush=True)
 
     def map_occupancy_callback(self, msg):
+        now = time.time()
+        if now - self.last_full_map_update_time < self.map_update_period:
+            return
+        self.last_full_map_update_time = now
+
         self.map_update_count += 1
         self.width = msg['info']['width']
         self.height = msg['info']['height']
@@ -210,10 +228,21 @@ class CreateClass():
         grid_data = np.array(msg['data']).reshape((self.height, self.width))
         self.occupancy_grid = 1.0 - (grid_data / 100.0)
 
-        self._prune_detected_cones()
+        self.prune_detected_cones()
+
+        if not self.return_home_mode and self.both_cone_colors_confirmed():
+            self.return_home_mode = True
+            self.p_des = None
+            self.des_path = None
+            self.rrt_tree_nodes = None
+            self.numWypts = 0
+            self.wp_num = 0
+            self.last_replan_map_update = -1
+            self.attempted_goal = None
+            print("Confirmed green and orange cones. Returning to home position.")
 
         # Fuse camera cone detections into the map as occupied disks.
-        self._overlay_detected_cones_on_occupancy_grid(self.occupancy_grid)
+        self.overlay_detected_cones_on_occupancy_grid(self.occupancy_grid)
 
         # Inflate obstacles in occupancy grid by robot radius to account for robot size in planning
         if self.robot_radius > 0:
@@ -221,7 +250,7 @@ class CreateClass():
             inflated_obstacles = ndimage.binary_dilation(self.occupancy_grid <= 0.0, iterations=inflation_radius)
             self.occupancy_grid[inflated_obstacles] = 0.0
 
-    def _overlay_detected_cones_on_occupancy_grid(self, grid):
+    def overlay_detected_cones_on_occupancy_grid(self, grid):
         if grid is None or self.grid_size is None or self.map_x_min is None or self.map_y_min is None:
             return
 
@@ -253,17 +282,13 @@ class CreateClass():
             roi = grid[y0:y1 + 1, x0:x1 + 1]
             roi[mask] = 0.0
 
-    def _prune_detected_cones(self):
+    def prune_detected_cones(self):
         now = time.time()
         with self.cone_lock:
             filtered = []
-            for cone in self.detected_cones:
+            for idx, cone in enumerate(self.detected_cones):
                 age = now - cone.get('last_seen', now)
                 is_confirmed = cone.get('hits', 0) >= self.cone_confirmations_required
-
-                # If cone should currently be visible but hasn't been re-detected, it's likely a false positive or moved.
-                if is_confirmed and age > self.cone_stale_time and self._is_cone_in_camera_view(cone['x'], cone['y']):
-                    continue
 
                 # Remove unconfirmed stale tracks to suppress transient artifacts.
                 if not is_confirmed and age > self.cone_stale_time:
@@ -273,7 +298,53 @@ class CreateClass():
 
             self.detected_cones = filtered
 
-    def _is_cone_in_camera_view(self, cone_x, cone_y):
+        self.publish_detected_cones()
+
+    def publish_detected_cones(self):
+        with self.cone_lock:
+            cones_snapshot = [dict(cone) for cone in self.detected_cones]
+
+        now = time.time()
+
+        pose_array = {
+            'header': {
+                'stamp': {
+                    'sec': int(now),
+                    'nanosec': int((now % 1) * 1e9)
+                },
+                'frame_id': 'map'
+            },
+            'poses': []
+        }
+
+        for cone in cones_snapshot:
+            pose_array['poses'].append({
+                'position': {
+                    'x': float(cone['x']),
+                    'y': float(cone['y']),
+                    'z': 0.0
+                },
+                'orientation': {
+                    'x': 0.0,
+                    'y': 0.0,
+                    'z': 0.0,
+                    'w': 1.0
+                }
+            })
+
+        self.cones_pub.publish(roslibpy.Message(pose_array))
+
+    def both_cone_colors_confirmed(self):
+        with self.cone_lock:
+            confirmed_ids = {
+                cone.get('id')
+                for cone in self.detected_cones
+                if cone.get('hits', 0) >= self.cone_confirmations_required
+            }
+
+        return 0 in confirmed_ids and 1 in confirmed_ids
+
+    def is_cone_in_camera_view(self, cone_x, cone_y):
         if self.x is None or self.y is None or self.yaw is None:
             return False
 
@@ -299,6 +370,11 @@ class CreateClass():
         return abs(angle_relative) <= self.camera_fov_half_rad
 
     def map_fov_occupancy_callback(self, msg):
+        now = time.time()
+        if now - self.last_fov_map_update_time < self.map_update_period:
+            return
+        self.last_fov_map_update_time = now
+
         self.fov_width = msg['info']['width']
         self.fov_height = msg['info']['height']
         self.fov_grid_size = msg['info']['resolution']
@@ -349,7 +425,7 @@ class CreateClass():
                 # print(f"Global position of detected item: ({item_x},{item_y})")
                 # print(f"Position of vehicle: ({self.x},{self.y})")
 
-                if not self._is_cone_in_camera_view(item_x, item_y):
+                if not self.is_cone_in_camera_view(item_x, item_y):
                     continue
 
                 # Associate this detection with existing cones based on proximity and ID, or create a new cone track if no match.
@@ -382,7 +458,7 @@ class CreateClass():
                             'hits': 1
                         })
 
-        self._prune_detected_cones()
+        self.prune_detected_cones()
 
     def on_result(self, result):
         self.dock_result = result
@@ -494,7 +570,7 @@ class CreateClass():
         for idx in range(len(path) - 1):
             start_node = np.array(path[idx])
             end_node = np.array(path[idx + 1])
-            if not checker._is_segment_collision_free(start_node, end_node):
+            if not checker.is_segment_collision_free(start_node, end_node):
                 return False
         return True
 
@@ -523,6 +599,11 @@ class CreateClass():
             near_wall_mask = ndimage.binary_dilation(occupied_or_unknown, iterations=clearance_cells)
         else:
             near_wall_mask = occupied_or_unknown
+
+        # Require each candidate frontier to sit in a sufficiently large connected free region.
+        free_mask = full_grid > 0.5
+        free_components, _ = ndimage.label(free_mask, structure=np.ones((3, 3), dtype=bool))
+        free_component_sizes = np.bincount(free_components.ravel())
 
         eps = 1e-3 # tolerance for floating point comparisons
         fov_unknown = np.isclose(fov_grid, 0.5, atol=eps)
@@ -556,6 +637,12 @@ class CreateClass():
             if full_y_idx < 0 or full_y_idx >= full_grid.shape[0]:
                 continue
             if full_grid[full_y_idx, full_x_idx] <= 0.5:
+                continue
+            component_idx = free_components[full_y_idx, full_x_idx]
+            if component_idx == 0:
+                continue
+            component_area = free_component_sizes[component_idx] * (grid_size ** 2)
+            if component_area < self.frontier_min_free_area:
                 continue
             if near_wall_mask[full_y_idx, full_x_idx]:
                 continue
@@ -687,6 +774,33 @@ class CreateClass():
         return False
 
     def waypoint_navigation(self):
+        # If both cone colors were found, return to the recorded home position.
+        if self.return_home_mode:
+            if self.home_pose is None:
+                self.control_movement(0.0, 0.0)
+                return
+
+            if self.p_des is None:
+                if self.last_replan_map_update != self.map_update_count:
+                    self.compute_rrt_path(goal=self.home_pose.tolist())
+                if self.p_des is None:
+                    self.control_movement(0.0, 0.0)
+                    return
+
+            if self.wp_num >= self.numWypts:
+                self.control_movement(0.0, 0.0)
+                self.robot_path = []
+                self.p_des = None
+                self.des_path = None
+                self.rrt_tree_nodes = None
+                self.wp_num = 0
+                self.return_home_mode = False
+                self.armed = False
+                self.is_manual_mode = True
+                self.last_replan_map_update = -1
+                print("Home position reached. Stopping.")
+                return
+
         # Perform one-time 360 scan before first exploration planning.
         if not self.initial_scan_done:
             self.run_initial_exploration_scan()
@@ -906,6 +1020,7 @@ class CreateClass():
         pygame.quit()
 
     def update_robot(self):
+        next_tick = time.perf_counter()
         while self.running: 
             if self.client.is_connected:
                 self.control_leds()
@@ -921,8 +1036,15 @@ class CreateClass():
                     self.robot_path = []
                     self.p_des = None
                     self.des_path = None
-                
-            time.sleep(0.1) # 10 Hz update rate
+
+            # Keep control on a fixed schedule so map/callback jitter has less impact.
+            next_tick += self.control_period
+            sleep_time = next_tick - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                # If we overran, reset schedule to avoid accumulating delay.
+                next_tick = time.perf_counter()
 
     def mowing_sound(self):
         while self.running:
@@ -1024,7 +1146,7 @@ class CreateClass():
 
             cone_color = 'lime' if cone['id'] == 0 else 'orange'
             self.ax_full.add_patch(Circle((cone['x'], cone['y']), self.cone_radius, edgecolor=cone_color, facecolor=cone_color, linewidth=2.0))
-            if self._is_cone_in_camera_view(cone['x'], cone['y']):
+            if self.is_cone_in_camera_view(cone['x'], cone['y']):
                 self.ax_fov.add_patch(Circle((cone['x'], cone['y']), self.cone_radius, edgecolor=cone_color, facecolor=cone_color, linewidth=2.0))
 
         # Plot RRT tree nodes and path on both plots for direct comparison.

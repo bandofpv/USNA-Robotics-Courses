@@ -3,7 +3,16 @@ import random
 import numpy as np
 
 class RRT:
-    def __init__(self, start, goal, map_grid, map_params, expand_dis=0.5, max_iter=500):
+    def __init__(
+        self,
+        start,
+        goal,
+        map_grid,
+        map_params,
+        expand_dis=0.5,
+        max_iter=500,
+        enable_pruning=True,
+    ):
         self.start = np.array(start)
         self.goal = np.array(goal)
         self.map = map_grid
@@ -14,6 +23,7 @@ class RRT:
 
         self.expand_dis = expand_dis
         self.max_iter = max_iter
+        self.enable_pruning = enable_pruning
         self.tree = [self.start]
         self.parent = {tuple(self.start): None}
 
@@ -39,21 +49,24 @@ class RRT:
             new_node = nearest_node + direction * self.expand_dis
             
             # 4. Collision Check (Segment Check) & Add to Tree
-            if self._is_segment_collision_free(nearest_node, new_node):
+            if self.is_segment_collision_free(nearest_node, new_node):
                 self.tree.append(new_node)
                 self.parent[tuple(new_node)] = nearest_node
                 
                 # Check if goal is reached
                 if np.linalg.norm(new_node - self.goal) <= self.expand_dis:
                     # Try to connect directly to goal
-                    if self._is_segment_collision_free(new_node, self.goal):
+                    if self.is_segment_collision_free(new_node, self.goal):
                         self.tree.append(self.goal)
                         self.parent[tuple(self.goal)] = new_node
-                        return self._extract_path()
+                        path = self.extract_path()
+                        if self.enable_pruning:
+                            return self.prune_path(path)
+                        return path
         return None
 
     # Check if a single node is collision-free
-    def _is_collision_free(self, node):
+    def is_collision_free(self, node):
         x_idx, y_idx = self.convert_to_grid(node)
         
         # Check bounds
@@ -67,7 +80,7 @@ class RRT:
         return True
 
     # Check if the line segment between start_node and end_node is collision-free
-    def _is_segment_collision_free(self, start_node, end_node):
+    def is_segment_collision_free(self, start_node, end_node):
         dist = np.linalg.norm(end_node - start_node)
         if dist == 0: return True
         
@@ -78,12 +91,12 @@ class RRT:
         
         for i in range(steps + 1):
              check_point = start_node + direction * (i * (dist / steps))
-             if not self._is_collision_free(check_point):
+             if not self.is_collision_free(check_point):
                  return False
                  
         return True
 
-    def _extract_path(self):
+    def extract_path(self):
         path = [self.goal]
         curr = tuple(self.goal)
         while curr is not None:
@@ -95,3 +108,27 @@ class RRT:
                 path.append(val) 
             curr = tuple(val) if val is not None else None
         return path[::-1] # Return reversed path (start -> goal)
+
+    # Shortcut-based path pruning: remove intermediate waypoints when a direct
+    # segment between two farther points is collision-free.
+    def prune_path(self, path):
+        if path is None or len(path) <= 2:
+            return path
+
+        path_np = [np.array(p) for p in path]
+        pruned = [path_np[0]]
+        i = 0
+
+        while i < len(path_np) - 1:
+            next_i = i + 1
+
+            # Greedily connect to the farthest reachable waypoint.
+            for j in range(len(path_np) - 1, i, -1):
+                if self.is_segment_collision_free(path_np[i], path_np[j]):
+                    next_i = j
+                    break
+
+            pruned.append(path_np[next_i])
+            i = next_i
+
+        return pruned

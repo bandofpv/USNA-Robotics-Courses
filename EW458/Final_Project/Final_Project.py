@@ -774,6 +774,8 @@ class CreateClass():
         return False
 
     def waypoint_navigation(self):
+        active_goal = self.home_pose.tolist() if (self.return_home_mode and self.home_pose is not None) else None
+
         # If both cone colors were found, return to the recorded home position.
         if self.return_home_mode:
             if self.home_pose is None:
@@ -782,7 +784,7 @@ class CreateClass():
 
             if self.p_des is None:
                 if self.last_replan_map_update != self.map_update_count:
-                    self.compute_rrt_path(goal=self.home_pose.tolist())
+                    self.compute_rrt_path(goal=active_goal)
                 if self.p_des is None:
                     self.control_movement(0.0, 0.0)
                     return
@@ -816,13 +818,14 @@ class CreateClass():
             self.numWypts = 0
             self.wp_num = 0
             self.last_replan_map_update = -1
-            print("Robot exited occupied region. Replanning frontier exploration.")
+            objective_text = "home return" if self.return_home_mode else "frontier exploration"
+            print(f"Robot exited occupied region. Replanning {objective_text}.")
 
         # If no desired path is set, compute a new RRT path to the goal
         if self.p_des is None:
             # Replan only when fresh map data is available to avoid repetitive retries.
             if self.last_replan_map_update != self.map_update_count:
-                self.compute_rrt_path(goal=None)
+                self.compute_rrt_path(goal=active_goal)
             if self.p_des is None:
                 self.control_movement(0.0, 0.0)
                 return
@@ -853,7 +856,7 @@ class CreateClass():
             self.is_bumped = False
             # Force immediate replan after bump even if map hasn't changed yet.
             self.last_replan_map_update = -1
-            self.compute_rrt_path(goal=None)
+            self.compute_rrt_path(goal=active_goal)
             if self.p_des is None:
                 print("Bump detected. Replanning...")
                 return
@@ -890,7 +893,7 @@ class CreateClass():
             dist2wp_prev = 0 # No previous waypoint, assume we are at it
 
         # Don't move forward until facing right direction
-        if abs(yaw_error) > self.yaw_thresh and dist2wp_prev < self.wp_rad:
+        if abs(yaw_error) > self.yaw_thresh and (dist2wp_prev < self.wp_rad or self.return_home_mode):
             u_des = 0
         else:
             self.yaw_error.append(yaw_error)
@@ -1247,7 +1250,7 @@ class CreateClass():
         print(f"Detected cones: {self.detected_cones}")
 
 if __name__ == "__main__":
-    js = CreateClass(id=86)
+    js = CreateClass(id=81)
     print("Main script running. Press Ctrl+C to stop.")
 
     try:

@@ -391,7 +391,7 @@ class MapClass():
         plt.pause(0.01)
 
 if __name__ == "__main__":
-    map = MapClass('odom', plot_map=False, id=86, update_delay=1.0, camera_fov_deg=66.0, camera_range=3.0)
+    map = MapClass('odom', plot_map=False, id=81, update_delay=1.0, camera_fov_deg=66.0, camera_range=3.0)
     print("Main script running. Press Ctrl+C to stop.")
 
     try: 
